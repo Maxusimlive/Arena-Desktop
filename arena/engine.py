@@ -887,11 +887,8 @@ class BrowserEngine:
                 self.hide()
         if not self._imported and not self.has_session():
             self._imported = True
-            from arena.config import COOKIE_FILE
-            try:
-                saved = COOKIE_FILE.read_text(encoding="utf-8").strip()
-            except OSError:
-                saved = ""
+            from arena.config import get_cookie
+            saved = get_cookie() or ""
             if contracts.AUTH_COOKIE_PREFIX in saved and self.import_cookies(saved):
                 return  # reloads; this handler runs again
         self._imported = True

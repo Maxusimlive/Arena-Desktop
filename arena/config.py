@@ -65,20 +65,34 @@ def save_config(cfg: Dict[str, Any]) -> None:
 
 
 def get_cookie() -> Optional[str]:
-    """Retrieve the stored cookie string."""
+    """Retrieve the stored cookie, migrating legacy plaintext on Windows."""
     try:
         if COOKIE_FILE.exists():
-            val = COOKIE_FILE.read_text(encoding="utf-8").strip()
-            return val if val else None
+            stored = COOKIE_FILE.read_text(encoding="utf-8").strip()
+            if not stored:
+                return None
+            from arena import crypto
+            val = crypto.decode_cookie(stored)
+            if not val:
+                return None
+            # One-way, opportunistic migration: a readable pre-DPAPI file is
+            # rewritten in protected form the first time it is loaded.
+            if crypto.DPAPI_AVAILABLE and not crypto.is_protected(stored):
+                try:
+                    save_cookie(val)
+                except Exception:
+                    pass
+            return val
     except Exception:
         pass
     return None
 
 
 def save_cookie(val: str) -> None:
-    """Save cookie string to disk."""
+    """Save a cookie string (DPAPI-protected for the current Windows user)."""
     ensure_config_dir()
-    COOKIE_FILE.write_text(val.strip(), encoding="utf-8")
+    from arena import crypto
+    COOKIE_FILE.write_text(crypto.protect_text(val.strip()), encoding="utf-8")
 
 
 def clear_cookie() -> None:

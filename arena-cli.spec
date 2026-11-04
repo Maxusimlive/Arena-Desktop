@@ -5,6 +5,11 @@ Bundles static assets (HTML/CSS/JS) and the full arena package into a single .ex
 """
 
 import os
+import platform
+
+_HOST_ARCH = (os.environ.get("ARENA_TARGET_ARCH") or platform.machine() or "").lower()
+_IS_ARM64 = _HOST_ARCH in ("arm64", "aarch64")
+_EXE_NAME = "Arena-Desktop-arm64" if _IS_ARM64 else "Arena-Desktop"
 
 a = Analysis(
     ['arena-cli.py'],
@@ -25,9 +30,11 @@ a = Analysis(
         'arena.menu',
         'arena.models',
         'arena.desktop',
+        'arena.deep_links',
         'arena.web',
         'arena.web.app',
         'arena.contracts',
+        'arena.crypto',
         'arena.connectors',
         'arena.history_sync',
         'arena.permissions',
@@ -82,11 +89,13 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='Arena-Desktop',
+    name=_EXE_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX does not provide a reliable Windows ARM64 PE path; leave the
+    # native ARM64 bootloader unpacked instead of risking a broken EXE.
+    upx=not _IS_ARM64,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

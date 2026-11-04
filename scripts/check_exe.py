@@ -71,7 +71,7 @@ def main(path: str) -> int:
                    and b"createPairwiseFeedback" in engine))
 
     app = modules["arena.web.app"]
-    checks.append(("app: APP_VERSION 5.6.1", b"5.6.1" in app))
+    checks.append(("app: APP_VERSION 5.7.0", b"5.7.0" in app))
     checks.append(("app: native create direct with genuine-cx ladder",
                    b"genuine-cx+connectors" in app and b"_native_drive" not in app))
     checks.append(("app: turn-complete record detection + drain resume",
@@ -103,7 +103,7 @@ def main(path: str) -> int:
                    b"is_turn_complete_record" in native and b"trigger-control" in native))
 
     index = entries.get("arena/web/static/index.html", b"")
-    checks.append(("index.html: assets v=5.6.1", b"?v=5.6.1" in index))
+    checks.append(("index.html: assets v=5.7.0", b"?v=5.7.0" in index))
     checks.append(("index.html: Arena dropdown chips + resize handles, no segmented bars",
                    b'id="modeButton"' in index and b'id="modalityButton"' in index
                    and b'id="sidebarResize"' in index and b'id="workspaceResize"' in index
@@ -121,7 +121,7 @@ def main(path: str) -> int:
                    and b"cookie-policy" in index))
 
     app_js = entries.get("arena/web/static/app.js", b"")
-    checks.append(("app.js: demo app_version 5.6.1", b"app_version: '5.6.1'" in app_js))
+    checks.append(("app.js: demo app_version 5.7.0", b"app_version: '5.7.0'" in app_js))
     checks.append(("app.js: cloud chat open passes title",
                    b"openArenaChat(id, type, title)" in app_js))
     checks.append(("app.js: Arena dropdowns + vote + chat lock",
@@ -266,10 +266,10 @@ def main(path: str) -> int:
                    and b"data-tool-results" in native_m
                    and b"awaiting_user_response" in native_m))
     checks.append(("v5.6: native image choice, CAS proxy and model reveal",
-                   b"_native_image_choice_hitl" in app and b"/api/native-cas/" in app
+                   b"_native_media_choice_hitl" in app and b"/api/native-cas/" in app
                    and b"data-image-battle-reveal" in native_m
                    and b"renderMediaChoiceCard" in app_js
-                   and b"Use this image" in app_js))
+                   and b"Use this" in app_js and b"Full size" in app_js))
     checks.append(("v5.6.1: cursor never rewinds + stale turn-complete guard",
                    b"_native_cursor_max" in app
                    and b"ignoring stale turn-complete" in app
@@ -281,6 +281,36 @@ def main(path: str) -> int:
                    b"__workspace__" in app and b"_gateway_workspace_call" in app
                    and b"paths are relative to that folder" in gateway_m
                    and b"Expose the picked Workspace folder" in app_js))
+    crypto_m = modules["arena.crypto"]
+    deep_links_m = modules["arena.deep_links"]
+    desktop_m = modules["arena.desktop"]
+    checks.append(("v5.7: native Arena Agent voice choice + listening stats",
+                   b"voice_choice_from_output" in native_m
+                   and b"_native_media_choice_hitl" in app
+                   and b"voiceListeningPayload" in app_js
+                   and b"Use this" in app_js))
+    checks.append(("v5.7: streaming state + final Summary below work timeline",
+                   b"data-lane-summary" in app_js
+                   and b"Jump to the final summary" in app_js
+                   and b"data-preserve-key" in app_js))
+    checks.append(("v5.7: safe upload diagnostics + attachment compatibility",
+                   b"_record_upload_diagnostic" in app
+                   and b"unsupported_attachment_model" in app
+                   and b"diagnostic_id" in app_js))
+    checks.append(("v5.7: Ctrl+K palette incl. Compact and HTML export",
+                   b"openCommandPalette" in app_js and b"action:compact" in app_js
+                   and b"action:export-html" in app_js))
+    checks.append(("v5.7: Workspace Git panel + standalone HTML chat export",
+                   b"/api/workspace/git/status" in app
+                   and b"/export.html" in app and b"Stage all changes" in app_js))
+    checks.append(("v5.7: opt-in multi-session sub-agents",
+                   b"_run_subagent_scheduled" in app
+                   and b"/api/account-sessions" in app
+                   and b"multi_session_subagents" in app_js))
+    checks.append(("v5.7: arenadesktop:// handoff + versioned DPAPI cookies",
+                   b"register_protocol" in deep_links_m
+                   and b"__arenaDeepLink" in desktop_m and b"__arenaDeepLink" in app_js
+                   and b"ARENA-DPAPI-v1:" in crypto_m))
 
     ok = True
     for label, passed in checks:

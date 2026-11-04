@@ -10,8 +10,20 @@ import hashlib
 import io
 
 import pytest
+from PIL import Image
 
 from arena.web import app as web
+
+
+def _png_bytes(size=None):
+    """A real 1x1 RGB PNG, optionally padded after IEND to an exact size."""
+    buf = io.BytesIO()
+    Image.new("RGB", (1, 1), (10, 20, 30)).save(buf, format="PNG")
+    data = buf.getvalue()
+    if size is not None:
+        assert size >= len(data)
+        data += b"x" * (size - len(data))
+    return data
 
 
 @pytest.fixture()
@@ -50,13 +62,18 @@ def _post(client, name, data, kind="evaluation", modality=None, content_type=Non
 
 def test_evaluation_upload_flow(uploads):
     client, calls = uploads
-    resp = _post(client, "cat.png", b"\x89PNG fake")
+    data = _png_bytes()
+    resp = _post(client, "cat.png", data)
     assert resp.status_code == 200, resp.get_json()
     out = resp.get_json()
-    assert out == {"ok": True, "kind": "evaluation", "name": "cat.png",
-                   "contentType": "image/png",
-                   "url": "https://storage.example/signed/a.png", "size": 9}
-    assert calls["put"] == [("https://storage.example/put", "image/png", 9)]
+    assert out["ok"] is True and out["kind"] == "evaluation"
+    assert out["name"] == out["filename"] == "cat.png"
+    assert out["contentType"] == out["mediaType"] == "image/png"
+    assert out["url"] == "https://storage.example/signed/a.png"
+    assert out["size"] == len(data)
+    assert out["image"] == {"format": "PNG", "width": 1, "height": 1,
+                            "mode": "RGB", "animated": False, "normalized": False}
+    assert calls["put"] == [("https://storage.example/put", "image/png", len(data))]
     paths = [p for p, _ in calls["arena"]]
     assert paths[0].endswith("generate-upload-url") and paths[1].endswith("get-signed-url")
 
@@ -91,10 +108,11 @@ def test_agent_rejects_python_files(uploads):
 
 def test_size_limits_per_area(uploads):
     client, _ = uploads
-    big = b"x" * (16 * 1024 * 1024)
+    big = _png_bytes(16 * 1024 * 1024)
     assert _post(client, "photo.png", big).status_code == 400
-    assert _post(client, "photo.png", b"x" * (11 * 1024 * 1024), modality="video").status_code == 400
-    assert _post(client, "photo.png", b"x" * (11 * 1024 * 1024)).status_code == 200
+    eleven = _png_bytes(11 * 1024 * 1024)
+    assert _post(client, "photo.png", eleven, modality="video").status_code == 400
+    assert _post(client, "photo.png", eleven).status_code == 200
     pdf = b"%PDF" + b"x" * (11 * 1024 * 1024)
     agent_pdf = _post(client, "doc.pdf", pdf, kind="agent")
     assert agent_pdf.status_code == 400
@@ -133,3 +151,76 @@ def test_media_type_prefers_extension_for_text_kinds():
     assert web._attachment_media_type("page.html", "text/plain") == "text/html"
     assert web._attachment_media_type("cfg.json", "text/plain") == "application/json"
     assert web._attachment_media_type("photo.jpg", "") == "image/jpeg"
+
+
+def test_upload_diagnostics_record_safe_metadata(uploads):
+    client, _calls = uploads
+    web._UPLOAD_DIAGNOSTICS.clear()
+    data = _png_bytes()
+    resp = client.post("/api/uploads", data={
+        "file": (io.BytesIO(data), "very-secret-screenshot.png", "image/png"),
+        "kind": "evaluation", "modality": "text", "source": "paste",
+        "app_mode": "direct", "attempt": "2",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    out = resp.get_json()
+    entry = web._upload_diagnostics_snapshot()[-1]
+    assert out["diagnostic_id"] == entry["id"]
+    assert out["stage"] == entry["stage"] == "complete"
+    assert entry["source"] == "paste"
+    assert entry["app_mode"] == "direct"
+    assert entry["attempt"] == 2
+    assert entry["detected_type"] == entry["resolved_type"] == "image/png"
+    assert entry["bytes_in"] == entry["bytes_out"] == len(data)
+    assert entry["image"]["width"] == entry["image"]["height"] == 1
+    rendered = "\n".join(web._upload_diagnostic_lines())
+    assert "very-secret-screenshot" not in rendered
+    assert "storage.example" not in rendered
+    assert "signed/a.png" not in rendered
+
+
+def test_upload_diagnostics_record_stage_and_arena_status(uploads, monkeypatch):
+    client, _calls = uploads
+    web._UPLOAD_DIAGNOSTICS.clear()
+    monkeypatch.setattr(
+        web, "_arena_post_json",
+        lambda *_args, **_kwargs: (None, "Arena refused https://storage.example/x?sig=secret", 403))
+    resp = client.post("/api/uploads", data={
+        "file": (io.BytesIO(_png_bytes()), "private-name.png", "image/png"),
+        "kind": "evaluation", "source": "drop", "app_mode": "battle", "attempt": "1",
+    })
+    assert resp.status_code == 502
+    entry = web._upload_diagnostics_snapshot()[-1]
+    assert entry["stage"] == "mint_upload"
+    assert entry["http_status"] == 502
+    assert entry["arena_status"] == 403
+    assert entry["source"] == "drop"
+    rendered = "\n".join(web._upload_diagnostic_lines())
+    assert "private-name" not in rendered
+    assert "sig=secret" not in rendered
+    assert "storage.example" not in rendered
+
+
+def test_upload_diagnostics_ring_is_bounded():
+    web._UPLOAD_DIAGNOSTICS.clear()
+    for index in range(25):
+        web._record_upload_diagnostic(
+            {"id": f"id{index}", "kind": "evaluation"},
+            stage="validate", outcome="error", http_status=400,
+            code="unsupported_attachment")
+    entries = web._upload_diagnostics_snapshot()
+    assert len(entries) == web._UPLOAD_DIAGNOSTICS_MAX == 20
+    assert entries[0]["id"] == "id5"
+    assert entries[-1]["id"] == "id24"
+
+
+def test_model_input_support_treats_tag_absence_as_unknown():
+    from arena import models
+
+    assert models.model_input_support({"capabilities": ["Router"]}) == {
+        "image": None, "file": None}
+    assert models.model_input_support({"capabilities": ["Vision", "PDF"]}) == {
+        "image": True, "file": True}
+    assert models.model_input_support({
+        "capabilities": {"inputCapabilities": {"text": {}, "image": False}}
+    }) == {"image": False, "file": False}

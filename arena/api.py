@@ -399,17 +399,22 @@ def extract_bearer_token(cookie_str: str) -> Optional[str]:
 class ArenaClient:
     """Client for interacting with Arena.ai API across all modalities."""
 
-    def __init__(self, cookie_str: Optional[str] = None):
+    def __init__(self, cookie_str: Optional[str] = None, allow_cdp: bool = True,
+                 cookie_sink=None):
         self.cookie_str = cookie_str
         self.session = requests.Session()
         self._cookie_lock = threading.Lock()
+        self._cookie_sink = cookie_sink
         self.eval_id: Optional[str] = None
         self.active_mode = "battle"
         self.active_modality = "chat"  # 'chat' | 'webdev' | 'search' | 'image'
         self.last_preview_url: Optional[str] = None
         self.sources: List[Dict[str, Any]] = []
         self.cdp_port = 9222
-        self.use_cdp = _cdp_find_arena_tab(self.cdp_port) is not None
+        # Account-session workers must not inject another account's cookies
+        # into the user's visible CDP browser.  Only the interactive client
+        # keeps the historical CDP behaviour.
+        self.use_cdp = bool(allow_cdp and _cdp_find_arena_tab(self.cdp_port) is not None)
         if self.use_cdp and cookie_str:
             inject_cookies_via_cdp(cookie_str, self.cdp_port)
 
@@ -447,8 +452,14 @@ class ArenaClient:
                 return
             self.cookie_str = current
             self._load_jar(current)
-            from arena.config import save_cookie
-            save_cookie(current)
+            if self._cookie_sink is not None:
+                try:
+                    self._cookie_sink(current)
+                except Exception:
+                    pass
+            else:
+                from arena.config import save_cookie
+                save_cookie(current)
 
     def get_me(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Validate the session against arena.ai (also triggers server-side token refresh)."""

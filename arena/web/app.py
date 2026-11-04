@@ -6,6 +6,7 @@ Serves the web UI and proxies chat requests to arena.ai.
 import copy
 import difflib
 import hashlib
+import hmac
 import json
 import logging
 import mimetypes
@@ -36,8 +37,10 @@ from arena.config import (
 )
 from arena.api import ArenaClient, extract_bearer_token, fetch_cookies_via_cdp
 from arena.models import (sync_models, get_models_for_modality, get_router_model,
-                          get_auto_agent_model, ORG_COLOR_MAP)
+                          get_auto_agent_model, model_input_support,
+                          model_can_receive_attachment, ORG_COLOR_MAP)
 from arena.auth import detect_installed_browsers, parse_cookie_input
+from arena.deep_links import parse_deep_link
 
 import base64
 import ctypes
@@ -45,10 +48,12 @@ import ctypes.wintypes
 import re
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import uuid
 import codecs
 import functools
+import html
 import http.server
 import io
 import mimetypes
@@ -165,7 +170,7 @@ def _find_preview_url(val):
     return None
 
 
-from arena import agent, components, connectors, contracts, history_sync, native_agent, permissions, workspace
+from arena import agent, components, connectors, contracts, crypto, history_sync, native_agent, permissions, workspace
 from arena.gateway import GatewayManager
 from arena.api import generate_uuidv7
 from arena.auth import get_clipboard_text
@@ -209,6 +214,13 @@ def _generation_finished(chat_id: str = None) -> None:
 # with kind "done" (a generation finished) or "question" (the model waits
 # for an answer).  The web headless server leaves it None.
 NOTIFY_HOOK = None
+
+# The desktop shell installs both values before its window opens.  A second
+# process launched by an arenadesktop:// link proves it is the same local
+# user by reading the random token from the per-user instance file; the
+# hook then shows the existing window and hands it the validated link.
+INSTANCE_TOKEN = None
+DEEP_LINK_HOOK = None
 
 
 def _notify(title: str, text: str, kind: str = "done") -> None:
@@ -264,7 +276,7 @@ STATIC_DIR = _base / "arena" / "web" / "static" if getattr(sys, 'frozen', False)
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="/static")
 
-APP_VERSION = "5.6.1"
+APP_VERSION = "5.7.0"
 
 
 @app.after_request
@@ -296,7 +308,8 @@ def _save_chat(chat_id: str, title: str, messages: list,
                agent_backend: str = None, native: dict = None,
                mcp_guide_hash: str = None, memory_hash: str = None,
                pending_digest: str = None, parent_id: str = None,
-               delegate_guide: bool = None, gateway_session: str = None):
+               delegate_guide: bool = None, gateway_session: str = None,
+               account_id: str = None):
     if not _validate_chat_id(chat_id):
         return
     chat_dir = CHATS_DIR / chat_id
@@ -312,7 +325,7 @@ def _save_chat(chat_id: str, title: str, messages: list,
     data = {
         "id": chat_id,
         "title": title,
-        "account_id": existing.get("account_id") or _current_account_id(),
+        "account_id": existing.get("account_id") or account_id or _current_account_id(),
         "created_at": existing.get("created_at", now),
         "updated_at": now,
         "mode": mode,
@@ -456,13 +469,31 @@ def _delete_chat(chat_id: str) -> bool:
     return False
 
 
+def _read_cookie_file() -> Optional[str]:
+    try:
+        if not COOKIE_FILE.exists():
+            return None
+        stored = COOKIE_FILE.read_text(encoding="utf-8").strip()
+        cookie = crypto.decode_cookie(stored)
+        if cookie and crypto.DPAPI_AVAILABLE and not crypto.is_protected(stored):
+            try:
+                COOKIE_FILE.write_text(crypto.protect_text(cookie), encoding="utf-8")
+            except Exception:
+                pass
+        return cookie or None
+    except Exception:
+        return None
+
+
+def _write_cookie_file(cookie: str) -> None:
+    ensure_config_dir()
+    COOKIE_FILE.write_text(crypto.protect_text(str(cookie or "")), encoding="utf-8")
+
+
 def get_client() -> ArenaClient:
     global _client
     if _client is None:
-        cookie_str = None
-        if COOKIE_FILE.exists():
-            cookie_str = COOKIE_FILE.read_text(encoding="utf-8").strip()
-        _client = ArenaClient(cookie_str=cookie_str)
+        _client = ArenaClient(cookie_str=_read_cookie_file())
     return _client
 
 
@@ -510,8 +541,51 @@ def _allowed_model_ids(ui_mode: str, ui_modality: str) -> set:
             if m.get("model_id", m.get("id"))}
 
 
-def _auto_agent_model(preferred_id: str = None) -> Optional[dict]:
-    return get_auto_agent_model(_catalog_models(), preferred_id=preferred_id)
+def _auto_agent_model(preferred_id: str = None, required_inputs: tuple = ()) -> Optional[dict]:
+    return get_auto_agent_model(_catalog_models(), preferred_id=preferred_id,
+                                required_inputs=tuple(required_inputs or ()))
+
+
+def _catalog_model_by_id(model_id) -> Optional[dict]:
+    if model_id in (None, ""):
+        return None
+    target = str(model_id)
+    for model in _catalog_models() or []:
+        if str(model.get("model_id", model.get("id", ""))) == target:
+            return model
+    return None
+
+
+def _attachment_kinds(attachments) -> tuple:
+    kinds = []
+    for item in attachments or []:
+        if not isinstance(item, dict):
+            continue
+        media = str(item.get("contentType") or item.get("mediaType") or item.get("media_type") or "")
+        kind = "image" if media.lower().startswith("image/") else "file"
+        if kind not in kinds:
+            kinds.append(kind)
+    return tuple(kinds)
+
+
+def _model_attachment_error(model_id, attachments, label="The selected model") -> Optional[str]:
+    if not attachments or not model_id:
+        return None
+    model = _catalog_model_by_id(model_id)
+    if not model:
+        return None
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        media = str(item.get("contentType") or item.get("mediaType") or item.get("media_type") or "")
+        if model_can_receive_attachment(model, media) is False:
+            kinds = _attachment_kinds(attachments)
+            noun = ("image and file attachments" if set(kinds) == {"image", "file"}
+                    else "image attachments" if kinds == ("image",) else "file attachments")
+            name = model.get("name") or model.get("displayName") or model_id
+            return (f"{label} ({name}) does not accept {noun}. "
+                    "Choose a compatible model or remove the attachment.")
+    return None
 
 
 # ---------- Static serving ----------
@@ -708,7 +782,19 @@ def _accounts_load() -> dict:
     try:
         data = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict) and isinstance(data.get("accounts"), list):
-            return {"current": data.get("current"), "accounts": data["accounts"]}
+            store = {"current": data.get("current"), "accounts": data["accounts"]}
+            needs_migration = False
+            for record in store["accounts"]:
+                if not isinstance(record, dict) or not record.get("cookie"):
+                    continue
+                stored_cookie = str(record.get("cookie") or "")
+                record["cookie"] = crypto.decode_cookie(stored_cookie)
+                if (record["cookie"] and crypto.DPAPI_AVAILABLE
+                        and not crypto.is_protected(stored_cookie)):
+                    needs_migration = True
+            if needs_migration:
+                _accounts_save(store)
+            return store
     except Exception:
         pass
     return {"current": None, "accounts": []}
@@ -717,7 +803,17 @@ def _accounts_load() -> dict:
 def _accounts_save(store: dict):
     try:
         ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ACCOUNTS_FILE.write_text(json.dumps(store, ensure_ascii=False, indent=1), encoding="utf-8")
+        disk_store = copy.deepcopy(store)
+        for record in disk_store.get("accounts") or []:
+            if isinstance(record, dict) and record.get("cookie"):
+                try:
+                    record["cookie"] = crypto.protect_text(str(record["cookie"]))
+                except Exception:
+                    # A DPAPI failure must not lose a verified sign-in.  The
+                    # exception text is safe, but never log the cookie itself.
+                    LOG.warning("account cookie could not be DPAPI-protected", exc_info=True)
+        ACCOUNTS_FILE.write_text(
+            json.dumps(disk_store, ensure_ascii=False, indent=1), encoding="utf-8")
     except Exception:
         LOG.exception("accounts store save failed")
 
@@ -798,6 +894,22 @@ def _sync_current_account_cookie(cookie: str):
                 record["expired"] = False
                 _accounts_save(store)
             break
+
+
+def _sync_account_cookie(account_id: str, cookie: str):
+    """Persist a rotated cookie for one leased account session only."""
+    if not account_id or not cookie:
+        return
+    with _accounts_lock:
+        store = _accounts_load()
+        for record in store["accounts"]:
+            if record.get("id") == account_id:
+                if record.get("cookie") != cookie:
+                    record["cookie"] = cookie
+                    record["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    record["expired"] = False
+                    _accounts_save(store)
+                return
 
 
 def _mark_account_expired(account_id: str, expired: bool = True):
@@ -951,14 +1063,38 @@ def _activate_cookie(cookie_str: str, method: str):
         user, err = candidate.get_me()
     if not user:
         return jsonify({"ok": False, "error": f"arena.ai rejected this session ({err}). Sign in on arena.ai again, then copy fresh cookies."}), False
-    ensure_config_dir()
-    COOKIE_FILE.write_text(candidate.cookie_str, encoding="utf-8")
+    _write_cookie_file(candidate.cookie_str)
     _client = candidate
     _me_cache.update(t=time.time(), user=user, err=None)
     _register_account(user, candidate.cookie_str)
     _, _, cookie_user = parse_cookie_input(candidate.cookie_str)
     ident = _user_identity(user, cookie_user or {})
     return jsonify({"ok": True, "method": method, **ident}), True
+
+
+@app.route("/api/deep-link", methods=["POST"])
+def api_deep_link():
+    """Receive an arenadesktop:// link from a short-lived second process."""
+    supplied = request.headers.get("X-Arena-Instance-Token") or ""
+    if not INSTANCE_TOKEN or not hmac.compare_digest(supplied, str(INSTANCE_TOKEN)):
+        return jsonify({"ok": False, "error": "invalid instance token"}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        link = parse_deep_link(data.get("url") or data.get("link"))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    hook = DEEP_LINK_HOOK
+    if hook is None:
+        return jsonify({"ok": False, "error": "desktop window is not ready"}), 503
+    try:
+        accepted = hook(dict(link))
+    except Exception:
+        LOG.exception("deep link hook failed")
+        accepted = False
+    if not accepted:
+        return jsonify({"ok": False, "error": "desktop window did not accept the link"}), 503
+    # The prompt text itself is deliberately not echoed back or logged.
+    return jsonify({"ok": True, "action": link.get("action")})
 
 
 @app.route("/api/models")
@@ -983,6 +1119,7 @@ def api_models():
         else:
             org_name = str(raw_org).lower()
             org_display = str(raw_org)
+        input_support = model_input_support(m)
         result.append({
             "id": m.get("model_id", m.get("id", "")),
             "name": m.get("name", ""),
@@ -992,6 +1129,8 @@ def api_models():
             "color": ORG_COLOR_MAP.get(org_name, "#C7C2BC"),
             "rank": m.get("rank", m.get("arena_rank")),
             "capabilities": m.get("capabilities", []),
+            "supports_image_input": input_support["image"],
+            "supports_file_input": input_support["file"],
             "arena_score": m.get("arena_score"),
             "user_selectable": bool(m.get("user_selectable")),
             "is_router": bool(m.get("is_router")),
@@ -1643,6 +1782,154 @@ def _redact_urls(line: str) -> str:
     return _URL_RE.sub(lambda m: m.group(1) + (m.group(2) or "").split("?")[0], line)
 
 
+_UPLOAD_DIAGNOSTICS_LOCK = threading.Lock()
+_UPLOAD_DIAGNOSTICS: list = []
+_UPLOAD_DIAGNOSTICS_MAX = 20
+_UPLOAD_SOURCE_VALUES = {"picker", "paste", "drop", "workspace", "retry", "unknown"}
+_UPLOAD_STAGE_VALUES = {
+    "auth", "received", "sniff", "prepare", "validate", "mint_upload",
+    "storage_put", "signed_url", "complete",
+}
+_UPLOAD_KIND_VALUES = {"evaluation", "agent"}
+
+
+def _safe_upload_token(value, fallback="unknown", limit=64) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9._/+:-]+", "-", text).strip("-")
+    return text[:limit] or fallback
+
+
+def _safe_upload_image_meta(meta) -> Optional[dict]:
+    if not isinstance(meta, dict):
+        return None
+    safe = {}
+    for key in ("format", "mode", "output_mode", "inspection"):
+        if meta.get(key) is not None:
+            safe[key] = _safe_upload_token(meta.get(key), "unknown", 32).upper()
+    for key in ("width", "height", "output_width", "output_height"):
+        try:
+            number = int(meta.get(key) or 0)
+        except (TypeError, ValueError):
+            number = 0
+        if number > 0:
+            safe[key] = number
+    for key in ("animated", "normalized", "filename_corrected"):
+        if isinstance(meta.get(key), bool):
+            safe[key] = meta[key]
+    reasons = meta.get("reasons")
+    if isinstance(reasons, list):
+        safe["reasons"] = [_safe_upload_token(reason, "other", 32) for reason in reasons[:6]]
+    return safe
+
+
+def _record_upload_diagnostic(context: dict, *, stage: str, outcome: str,
+                              http_status: int, code: str = "ok",
+                              arena_status=None, storage_status=None) -> dict:
+    """Remember one upload attempt as metadata only.
+
+    Deliberately excluded: filename, file bytes/content hash, Arena storage
+    key, presigned/signed URL, cookies and free-form Arena error text.
+    """
+    source = _safe_upload_token(context.get("source"), "unknown", 24)
+    if source not in _UPLOAD_SOURCE_VALUES:
+        source = "unknown"
+    kind = _safe_upload_token(context.get("kind"), "evaluation", 24)
+    if kind not in _UPLOAD_KIND_VALUES:
+        kind = "evaluation"
+    stage = _safe_upload_token(stage, "received", 24)
+    if stage not in _UPLOAD_STAGE_VALUES:
+        stage = "received"
+
+    def safe_int(value):
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def safe_status(value):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return number if 0 <= number <= 999 else None
+
+    extension = Path(str(context.get("extension") or "")).suffix.lower()
+    extension = re.sub(r"[^a-z0-9.]+", "", extension)[:12]
+    entry = {
+        "id": _safe_upload_token(context.get("id"), uuid.uuid4().hex[:10], 16),
+        "time": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "stage": stage,
+        "outcome": "ok" if outcome == "ok" else "error",
+        "http_status": safe_status(http_status) or 0,
+        "arena_status": safe_status(arena_status),
+        "storage_status": safe_status(storage_status),
+        "code": _safe_upload_token(code, "ok" if outcome == "ok" else "error", 48),
+        "kind": kind,
+        "app_mode": _safe_upload_token(context.get("app_mode"), "unknown", 32),
+        "modality": _safe_upload_token(context.get("modality"), "unknown", 32),
+        "source": source,
+        "attempt": min(99, max(1, safe_int(context.get("attempt") or 1))),
+        "declared_type": _safe_upload_token(context.get("declared_type"), "unknown", 64),
+        "detected_type": _safe_upload_token(context.get("detected_type"), "unknown", 64),
+        "resolved_type": _safe_upload_token(context.get("resolved_type"), "unknown", 64),
+        "extension": extension or "-",
+        "bytes_in": safe_int(context.get("bytes_in")),
+        "bytes_out": safe_int(context.get("bytes_out")),
+        "image": _safe_upload_image_meta(context.get("image")),
+    }
+    with _UPLOAD_DIAGNOSTICS_LOCK:
+        _UPLOAD_DIAGNOSTICS.append(entry)
+        del _UPLOAD_DIAGNOSTICS[:-_UPLOAD_DIAGNOSTICS_MAX]
+    return entry
+
+
+def _upload_diagnostics_snapshot() -> list:
+    with _UPLOAD_DIAGNOSTICS_LOCK:
+        return [dict(entry) for entry in _UPLOAD_DIAGNOSTICS]
+
+
+def _upload_diagnostic_lines() -> list:
+    lines = []
+    for entry in _upload_diagnostics_snapshot():
+        parts = [
+            entry["time"],
+            f"id={entry['id']}",
+            f"outcome={entry['outcome']}",
+            f"stage={entry['stage']}",
+            f"http={entry['http_status']}",
+            f"code={entry['code']}",
+            f"kind={entry['kind']}",
+            f"mode={entry['app_mode']}",
+            f"modality={entry['modality']}",
+            f"source={entry['source']}",
+            f"attempt={entry['attempt']}",
+            f"declared={entry['declared_type']}",
+            f"detected={entry['detected_type']}",
+            f"resolved={entry['resolved_type']}",
+            f"ext={entry['extension']}",
+            f"bytes={entry['bytes_in']}->{entry['bytes_out']}",
+        ]
+        if entry.get("arena_status") is not None:
+            parts.append(f"arena_http={entry['arena_status']}")
+        if entry.get("storage_status") is not None:
+            parts.append(f"storage_http={entry['storage_status']}")
+        image = entry.get("image") or {}
+        if image:
+            descriptor = image.get("format") or "image"
+            if image.get("width") and image.get("height"):
+                descriptor += f":{image['width']}x{image['height']}"
+            if image.get("output_width") and image.get("output_height"):
+                descriptor += f"->{image['output_width']}x{image['output_height']}"
+            if image.get("mode"):
+                descriptor += f":{image['mode']}"
+            parts.append(f"image={descriptor}")
+            parts.append(f"normalized={str(bool(image.get('normalized'))).lower()}")
+            if image.get("reasons"):
+                parts.append("reasons=" + ",".join(image["reasons"]))
+        lines.append(" ".join(parts))
+    return lines
+
+
 @app.route("/api/diagnostics")
 def api_diagnostics():
     """A copyable support report: versions and state, no prompts or cookies."""
@@ -1663,6 +1950,9 @@ def api_diagnostics():
         f"Memory enabled: {_memory_enabled()}",
         f"Local chats: {len(_list_chats())}",
     ]
+    upload_lines = _upload_diagnostic_lines()
+    lines += ["", "--- Upload attempts, last 20 (metadata only; no names, content, hashes or URLs) ---"]
+    lines += upload_lines or ["none recorded in this app session"]
     try:
         tail = (COOKIE_FILE.parent / "desktop.log").read_text(
             encoding="utf-8", errors="replace").splitlines()[-60:]
@@ -1807,9 +2097,25 @@ def api_question_answer(qid):
     return jsonify({"ok": True})
 
 
+def _aligned_voice_stats(value, count, integer=False):
+    if not isinstance(value, list):
+        return None
+    result = []
+    for position in range(max(0, count)):
+        raw = value[position] if position < len(value) else 0
+        try:
+            number = int(raw) if integer else float(raw)
+        except (TypeError, ValueError, OverflowError):
+            number = 0
+        limit = 1000 if integer else 86400.0
+        number = min(limit, max(0, number))
+        result.append(number if integer else round(number, 3))
+    return result
+
+
 @app.route("/api/media-choices")
 def api_media_choices():
-    """Native Agent image choices still waiting for the user."""
+    """Native Agent image/voice choices still waiting for the user."""
     with _media_choices_lock:
         items = []
         for item in _MEDIA_CHOICES.values():
@@ -1832,8 +2138,11 @@ def api_media_choice_answer(choice_id):
     with _media_choices_lock:
         item = _MEDIA_CHOICES.get(choice_id)
         if not item or item.get("answer") is not None:
-            return jsonify({"error": "That image choice is no longer waiting.", "code": "gone"}), 404
-        candidates = ((item.get("media_choice") or {}).get("candidates") or [])
+            return jsonify({"error": "That media choice is no longer waiting.", "code": "gone"}), 404
+        choice = item.get("media_choice") or {}
+        kind = "voice" if choice.get("kind") == "voice" or item.get("tool") == "add_voice" else "image"
+        noun = "voice" if kind == "voice" else "image"
+        candidates = (choice.get("candidates") or [])
         indexes = []
         for candidate in candidates:
             try:
@@ -1841,22 +2150,34 @@ def api_media_choice_answer(choice_id):
             except (AttributeError, TypeError, ValueError):
                 pass
         if not indexes:
-            return jsonify({"error": "This image choice has no candidates.", "code": "empty"}), 422
+            return jsonify({"error": f"This {noun} choice has no candidates.", "code": "empty"}), 422
         if skip:
             selected = indexes[0]
         else:
             try:
                 selected = int(data.get("selected_index"))
             except (TypeError, ValueError):
-                return jsonify({"error": "Pick one of the images first.", "code": "empty"}), 400
+                return jsonify({"error": f"Pick one of the {noun}s first.", "code": "empty"}), 400
             if selected not in indexes:
-                return jsonify({"error": "That image is not one of the choices.", "code": "bad_index"}), 400
-        item["answer"] = {
+                return jsonify({"error": f"That {noun} is not one of the choices.", "code": "bad_index"}), 400
+        answer = {
             "selected_index": selected,
             "selection_method": "skip" if skip else "user",
         }
+        if kind == "voice":
+            play_counts = _aligned_voice_stats(data.get("play_counts"), len(indexes), integer=True)
+            listen_seconds = _aligned_voice_stats(data.get("listen_seconds"), len(indexes))
+            if play_counts is not None:
+                answer["play_counts"] = play_counts
+            if listen_seconds is not None:
+                answer["listen_seconds"] = listen_seconds
+            voice_id = choice.get("voice_id")
+            if isinstance(voice_id, str) and voice_id:
+                answer["voice_id"] = voice_id
+        item["answer"] = answer
     return jsonify({"ok": True, "selected_index": selected,
-                    "selection_method": "skip" if skip else "user"})
+                    "selection_method": "skip" if skip else "user",
+                    **({key: answer[key] for key in ("play_counts", "listen_seconds", "voice_id") if key in answer})})
 
 
 @app.route("/api/native-cas/<media_hash>")
@@ -1941,6 +2262,290 @@ def api_search():
         if len(results) >= 40:
             break
     return jsonify(results[:40])
+
+
+def _export_filename(data: dict) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(data.get("title") or "chat")).strip("-")[:60] or "chat"
+
+
+def _export_safe_url(raw, image=False):
+    value = str(raw or "").strip()
+    if image and re.match(r"data:image/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=\s]+$", value, re.I):
+        return value
+    parsed = urlparse(value)
+    if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
+        return value
+    if not image and parsed.scheme.lower() == "mailto":
+        return value
+    return None
+
+
+_EXPORT_INLINE_RE = re.compile(
+    r"(?P<code>`[^`\n]+`)|"
+    r"(?P<image>!\[(?P<image_alt>[^\]]*)\]\((?P<image_url>[^\s)]+)(?:\s+\"[^\"]*\")?\))|"
+    r"(?P<link>\[(?P<link_text>[^\]]+)\]\((?P<link_url>[^\s)]+)(?:\s+\"[^\"]*\")?\))|"
+    r"(?P<bold>\*\*(?P<bold_text>.+?)\*\*)|"
+    r"(?P<strike>~~(?P<strike_text>.+?)~~)|"
+    r"(?P<italic>(?<![\w*])\*(?P<italic_text>[^*\n]+?)\*(?![\w*])|(?<![\w_])_(?P<italic_text2>[^_\n]+?)_(?![\w_]))|"
+    r"(?P<autolink>https?://[^\s<>\"]+)",
+    re.S,
+)
+
+
+def _export_inline(text: str) -> str:
+    """Render a small, safe Markdown inline subset; every text node is escaped."""
+    parts = []
+    position = 0
+    for match in _EXPORT_INLINE_RE.finditer(str(text or "")):
+        parts.append(html.escape(str(text[position:match.start()])))
+        if match.group("code"):
+            parts.append(f"<code>{html.escape(match.group('code')[1:-1])}</code>")
+        elif match.group("image"):
+            alt = match.group("image_alt") or "Image"
+            safe_data = _export_safe_url(match.group("image_url"), image=True)
+            safe_link = _export_safe_url(match.group("image_url"))
+            if safe_data and safe_data.startswith("data:image/"):
+                parts.append(f'<img alt="{html.escape(alt, quote=True)}" src="{html.escape(safe_data, quote=True)}">')
+            elif safe_link:
+                parts.append(f'<a href="{html.escape(safe_link, quote=True)}" rel="noopener noreferrer">Image: {html.escape(alt)}</a>')
+            else:
+                parts.append(html.escape(f"[Image: {alt}]"))
+        elif match.group("link"):
+            safe = _export_safe_url(match.group("link_url"))
+            label = _export_inline(match.group("link_text"))
+            if safe:
+                parts.append(f'<a href="{html.escape(safe, quote=True)}" rel="noopener noreferrer">{label}</a>')
+            else:
+                parts.append(label)
+        elif match.group("bold"):
+            parts.append(f"<strong>{_export_inline(match.group('bold_text'))}</strong>")
+        elif match.group("strike"):
+            parts.append(f"<del>{_export_inline(match.group('strike_text'))}</del>")
+        elif match.group("italic"):
+            parts.append(f"<em>{_export_inline(match.group('italic_text') or match.group('italic_text2'))}</em>")
+        elif match.group("autolink"):
+            url = match.group("autolink").rstrip('.,;:!?)')
+            suffix = match.group("autolink")[len(url):]
+            safe = _export_safe_url(url)
+            if safe:
+                parts.append(f'<a href="{html.escape(safe, quote=True)}" rel="noopener noreferrer">{html.escape(url)}</a>{html.escape(suffix)}')
+            else:
+                parts.append(html.escape(match.group("autolink")))
+        position = match.end()
+    parts.append(html.escape(str(text[position:])))
+    return "".join(parts)
+
+
+def _export_table_cells(line: str):
+    value = line.strip()
+    if value.startswith("|"):
+        value = value[1:]
+    if value.endswith("|"):
+        value = value[:-1]
+    return [cell.strip() for cell in value.split("|")]
+
+
+def _export_is_block_start(lines, index):
+    line = lines[index]
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if stripped.startswith("```") or re.match(r"#{1,6}\s+", stripped):
+        return True
+    if re.match(r"([-*_])\1{2,}\s*$", stripped):
+        return True
+    if stripped.startswith(">") or re.match(r"\s*(?:[-*+]|\d+[.)])\s+", line):
+        return True
+    return bool("|" in line and index + 1 < len(lines)
+                and re.match(r"\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", lines[index + 1]))
+
+
+def _markdown_export_html(text: str) -> str:
+    """Small block-level Markdown renderer for a standalone exported chat."""
+    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    blocks = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped:
+            i += 1
+            continue
+        if stripped.startswith("```"):
+            language = re.sub(r"[^A-Za-z0-9_-]", "", stripped[3:].strip())[:40]
+            i += 1
+            code = []
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1
+            class_attr = f' class="language-{html.escape(language, quote=True)}"' if language else ""
+            blocks.append(f"<pre><code{class_attr}>{html.escape(chr(10).join(code))}</code></pre>")
+            continue
+        heading = re.match(r"(#{1,6})\s+(.+)", stripped)
+        if heading:
+            level = min(6, max(2, len(heading.group(1)) + 1))
+            blocks.append(f"<h{level}>{_export_inline(heading.group(2).strip())}</h{level}>")
+            i += 1
+            continue
+        if re.match(r"([-*_])\1{2,}\s*$", stripped):
+            blocks.append("<hr>")
+            i += 1
+            continue
+        if stripped.startswith(">"):
+            quote = []
+            while i < len(lines) and lines[i].strip().startswith(">"):
+                quote.append(re.sub(r"^\s*>\s?", "", lines[i]))
+                i += 1
+            blocks.append(f"<blockquote>{_markdown_export_html(chr(10).join(quote))}</blockquote>")
+            continue
+        if "|" in line and i + 1 < len(lines) and re.match(
+                r"\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", lines[i + 1]):
+            headers = _export_table_cells(line)
+            i += 2
+            rows = []
+            while i < len(lines) and lines[i].strip() and "|" in lines[i]:
+                rows.append(_export_table_cells(lines[i]))
+                i += 1
+            head_html = "".join(f"<th>{_export_inline(cell)}</th>" for cell in headers)
+            body_html = "".join(
+                "<tr>" + "".join(f"<td>{_export_inline(cell)}</td>" for cell in row) + "</tr>"
+                for row in rows)
+            blocks.append(f"<table><thead><tr>{head_html}</tr></thead><tbody>{body_html}</tbody></table>")
+            continue
+        unordered = re.match(r"\s*[-*+]\s+(.+)", line)
+        ordered = re.match(r"\s*\d+[.)]\s+(.+)", line)
+        if unordered or ordered:
+            ordered_list = bool(ordered)
+            items = []
+            while i < len(lines):
+                item_unordered = re.match(r"\s*[-*+]\s+(.+)", lines[i])
+                item_ordered = re.match(r"\s*\d+[.)]\s+(.+)", lines[i])
+                item = item_ordered if ordered_list else item_unordered
+                if not item:
+                    break
+                value = item.group(1)
+                task = re.match(r"\[([ xX])\]\s+(.+)", value)
+                if task:
+                    checked = " checked" if task.group(1).lower() == "x" else ""
+                    items.append(f'<li class="task"><input type="checkbox" disabled{checked}> {_export_inline(task.group(2))}</li>')
+                else:
+                    items.append(f"<li>{_export_inline(value)}</li>")
+                i += 1
+            tag = "ol" if ordered_list else "ul"
+            blocks.append(f"<{tag}>{''.join(items)}</{tag}>")
+            continue
+        paragraph = [line.strip()]
+        i += 1
+        while i < len(lines) and not _export_is_block_start(lines, i):
+            paragraph.append(lines[i].strip())
+            i += 1
+        blocks.append(f"<p>{_export_inline(' '.join(paragraph))}</p>")
+    return "\n".join(blocks)
+
+
+def _chat_export_html(data: dict) -> str:
+    title = str(data.get("title") or "Chat")
+    exported = datetime.now().strftime("%Y-%m-%d %H:%M")
+    mode = html.escape(str(data.get("mode") or ""))
+    modality = html.escape(str(data.get("modality") or ""))
+    selection = " · ".join(value for value in (mode, modality) if value)
+    sections = []
+    for message in data.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role == "notice":
+            sections.append('<div class="divider">Context compacted here</div>')
+            continue
+        if role == "user":
+            body = [_markdown_export_html(str(message.get("text") or ""))]
+            attachments = message.get("attachments") or message.get("experimental_attachments") or []
+            names = []
+            for item in attachments if isinstance(attachments, list) else []:
+                if isinstance(item, dict) and (item.get("name") or item.get("filename")):
+                    kind = item.get("contentType") or item.get("mediaType") or item.get("media_type") or ""
+                    label = str(item.get("name") or item.get("filename"))
+                    names.append(f"<li>{html.escape(label)}{f' <span>({html.escape(str(kind))})</span>' if kind else ''}</li>")
+            if names:
+                body.append(f'<div class="attachments"><strong>Attachments</strong><ul>{"".join(names)}</ul></div>')
+            sections.append(f'<section class="message user"><h2>User</h2>{"".join(body)}</section>')
+            continue
+        if role != "assistant":
+            continue
+        names = message.get("names") or {}
+        lane_sections = []
+        for key, text_field, reasoning_field in (("a", "text", "reasoning"), ("b", "text_b", "reasoning_b")):
+            text = str(message.get(text_field) or "")
+            reasoning = str(message.get(reasoning_field) or "")
+            lane_tools = [tool for tool in (message.get("tools") or [])
+                          if isinstance(tool, dict) and str(tool.get("lane") or "a") == key]
+            if not text and not reasoning and not lane_tools:
+                continue
+            who = str(names.get(key) or ("Assistant" if key == "a" else "Model B"))
+            pieces = [f"<h2>{html.escape(who)}</h2>"]
+            if reasoning:
+                pieces.append(
+                    '<details class="reasoning"><summary>Reflections</summary>'
+                    f'<div>{_markdown_export_html(reasoning)}</div></details>')
+            if text:
+                pieces.append(_markdown_export_html(text))
+            if lane_tools:
+                items = []
+                for tool in lane_tools:
+                    label = html.escape(str(tool.get("tool") or "tool"))
+                    summary = html.escape(str(tool.get("summary") or ""))
+                    status = html.escape(str(tool.get("status") or ""))
+                    items.append(f'<li><code>{label}</code> {summary} <span>({status})</span></li>')
+                pieces.append(
+                    f'<details class="tools"><summary>Tool steps ({len(lane_tools)})</summary>'
+                    f'<ul>{"".join(items)}</ul></details>')
+            lane_sections.append(f'<section class="message assistant">{"".join(pieces)}</section>')
+        sections.extend(lane_sections)
+        error = str(message.get("error") or "")
+        if error:
+            sections.append(f'<div class="error">{html.escape(error)}</div>')
+    css = """
+:root{color-scheme:light dark;--bg:#f4f4f1;--paper:#fff;--text:#242522;--muted:#6f716a;--line:#deded8;--soft:#f0f0eb;--code:#f4f4f0;--accent:#356b45}
+@media(prefers-color-scheme:dark){:root{--bg:#201f1e;--paper:#292827;--text:#f2f1ec;--muted:#aaa79f;--line:#41413d;--soft:#30302e;--code:#211f1e;--accent:#9fd3aa}}
+*{box-sizing:border-box}body{margin:0;padding:40px 20px;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;line-height:1.65}
+main{max-width:860px;margin:auto;padding:42px;background:var(--paper);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 36px rgba(0,0,0,.09)}
+header{padding-bottom:22px;margin-bottom:10px;border-bottom:1px solid var(--line)}.eyebrow{margin:0 0 6px;color:var(--accent);font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+h1{margin:0;font-size:32px;line-height:1.2}h2{font-size:19px;margin:0 0 10px}h3{font-size:17px}h4,h5,h6{font-size:15px}.meta{color:var(--muted);font-size:13px}
+.message{padding:24px 0;border-bottom:1px solid var(--line)}.message.user{padding:18px 20px;margin:22px 0 8px;background:var(--soft);border:1px solid var(--line);border-radius:12px}
+.message p{margin:.65em 0}.message img{max-width:100%;height:auto;border-radius:10px}a{color:var(--accent)}
+pre{overflow:auto;padding:16px;background:var(--code);border:1px solid var(--line);border-radius:10px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em}pre code{font-size:13px}
+table{width:100%;border-collapse:collapse;margin:16px 0}th,td{padding:8px 10px;border:1px solid var(--line);text-align:left}th{background:var(--soft)}
+blockquote{margin:16px 0;padding:4px 16px;color:var(--muted);border-left:4px solid var(--line)}details{margin:14px 0;padding:10px 14px;background:var(--soft);border:1px solid var(--line);border-radius:10px}
+summary{cursor:pointer;font-weight:650}.attachments{color:var(--muted);font-size:13px}.divider{margin:24px 0;padding:8px;text-align:center;color:var(--muted);border-top:1px dashed var(--line);border-bottom:1px dashed var(--line)}
+.error{margin:14px 0;padding:12px 14px;color:#8d2118;background:#fff0ed;border:1px solid #e0aaa3;border-radius:10px}footer{padding-top:22px;color:var(--muted);font-size:12px;text-align:center}
+@media(max-width:640px){body{padding:0}main{padding:24px 18px;border:0;border-radius:0}h1{font-size:26px}}@media print{body{padding:0;background:#fff}main{max-width:none;border:0;box-shadow:none}.message{break-inside:avoid}}
+""".strip()
+    selection_html = f' · {selection}' if selection else ''
+    return (
+        '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
+        'style-src \'unsafe-inline\'; img-src data:; font-src data:">\n'
+        f'<title>{html.escape(title)} · Arena Desktop export</title>\n<style>{css}</style>\n</head>\n<body>\n<main>\n'
+        '<header><p class="eyebrow">Arena Desktop export</p>'
+        f'<h1>{html.escape(title)}</h1><p class="meta">Exported on {html.escape(exported)}{selection_html}</p></header>\n'
+        + "\n".join(sections)
+        + '\n<footer>Generated locally by Arena Desktop. External links are not loaded automatically.</footer>\n</main>\n</body>\n</html>\n'
+    )
+
+
+@app.route("/api/chats/<chat_id>/export.html")
+def api_chat_export_html(chat_id):
+    """The whole chat as one standalone, styled HTML file."""
+    data = _load_chat(chat_id)
+    if not data:
+        return jsonify({"error": "Chat not found"}), 404
+    return Response(_chat_export_html(data), mimetype="text/html; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="{_export_filename(data)}.html"',
+        "X-Content-Type-Options": "nosniff",
+    })
 
 
 @app.route("/api/chats/<chat_id>/export.md")
@@ -2842,11 +3447,29 @@ class _HttpStream:
         return self._text
 
 
+def _client_account_id(client) -> Optional[str]:
+    account_id = getattr(client, "_arena_account_id", None)
+    return str(account_id) if account_id else _current_account_id()
+
+
+def _client_uses_engine(client) -> bool:
+    """The one visible browser engine always belongs to the current account.
+
+    A leased non-current account has its own requests.Session/cookie jar and
+    must use it directly; routing it through ENGINE would silently send the
+    work as the current account and then sync the wrong cookies back.
+    """
+    if not _engine_on():
+        return False
+    account_id = getattr(client, "_arena_account_id", None)
+    return not account_id or str(account_id) == str(_current_account_id() or "")
+
+
 def _send(client: ArenaClient, path: str, body: dict):
     # Video Arena may take up to ten minutes.  Keep every other modality on
     # the existing three/five-minute guardrails.
     timeout = 720 if body.get("modality") == "video" else 300
-    if _engine_on():
+    if _client_uses_engine(client):
         if not ENGINE.wait_ready(30):
             return _HttpStream(error=f"arena.ai is waiting for a {ENGINE.challenge} check" if ENGINE.challenge
                                else "arena.ai window is still loading")
@@ -3271,13 +3894,15 @@ def _usage_save() -> None:
         pass
 
 
-def _usage_account():
+def _usage_account(account_id=None):
     try:
         store = _accounts_load()
-        current = store.get("current")
-        record = next((a for a in store.get("accounts") or [] if a.get("id") == current), None)
+        wanted = str(account_id) if account_id else store.get("current")
+        record = next((a for a in store.get("accounts") or [] if a.get("id") == wanted), None)
         if record:
-            return str(record.get("id") or "current"), (record.get("email") or record.get("name") or "")
+            return str(record.get("id") or wanted or "current"), (record.get("email") or record.get("name") or "")
+        if wanted:
+            return str(wanted), ""
     except Exception:
         pass
     return "current", ""
@@ -3297,10 +3922,10 @@ def _usage_blank(email=""):
     return {"email": email, "sends": 0, "by_modality": {}, "models": {}, "rate_limits": 0}
 
 
-def _usage_note_send(conv) -> None:
+def _usage_note_send(conv, account_id=None) -> None:
     global _USAGE_SENDS_SINCE_SAVE
     try:
-        account_id, email = _usage_account()
+        account_id, email = _usage_account(account_id or (conv or {}).get("account_id"))
         acct = _usage_day().setdefault(account_id, _usage_blank(email))
         if email:
             acct["email"] = email
@@ -3320,9 +3945,9 @@ def _usage_note_send(conv) -> None:
         pass
 
 
-def _usage_note_429(conv, err) -> None:
+def _usage_note_429(conv, err, account_id=None) -> None:
     try:
-        account_id, email = _usage_account()
+        account_id, email = _usage_account(account_id or (conv or {}).get("account_id"))
         acct = _usage_day().setdefault(account_id, _usage_blank(email))
         acct["rate_limits"] = int(acct.get("rate_limits") or 0) + 1
         events = _usage()["events"]
@@ -3371,6 +3996,21 @@ def _pacer_lane_key(conv) -> str:
     return "media" if str((conv or {}).get("modality") or "") in ("image", "video") else "text"
 
 
+def _pacer_scope_key(conv) -> str:
+    """Pacing bucket for one Arena account + modality.
+
+    The current account keeps the historical plain ``text``/``media`` keys;
+    a leased background account gets its own bucket so its cooldown does
+    not throttle (or get hidden by) the interactive account.
+    """
+    lane = _pacer_lane_key(conv)
+    account_id = str((conv or {}).get("account_id") or "")
+    current_id = str(_current_account_id() or "")
+    if not account_id or account_id == current_id:
+        return lane
+    return f"account:{account_id}:{lane}"
+
+
 def _pacer_lane(key: str) -> dict:
     lane = _PACER_LANES.get(key)
     if lane is None:
@@ -3400,11 +4040,12 @@ def _pacer_acquire(conv):
     params = _pacing_params()
     if not params["enabled"]:
         return _PacerPermit()
-    key = _pacer_lane_key(conv)
-    base = params["media_interval"] if key == "media" else params["text_interval"]
+    modality_key = _pacer_lane_key(conv)
+    key = _pacer_scope_key(conv)
+    base = params["media_interval"] if modality_key == "media" else params["text_interval"]
     burst = max(1, int(params["burst"]))
     max_wait = float(params["max_wait"])
-    concurrency = 1 if key == "media" else 2
+    concurrency = 1 if modality_key == "media" else 2
     waited = 0.0
     noticed = False
     ping_at = 10.0
@@ -3459,9 +4100,10 @@ def _pacer_note_429(conv, wait_seconds) -> None:
         wait = float(wait_seconds or 0)
     except (TypeError, ValueError):
         wait = 0
-    key = _pacer_lane_key(conv)
+    modality_key = _pacer_lane_key(conv)
+    key = _pacer_scope_key(conv)
     params = _pacing_params()
-    base = params["media_interval"] if key == "media" else params["text_interval"]
+    base = params["media_interval"] if modality_key == "media" else params["text_interval"]
     with _PACER_LOCK:
         lane = _pacer_lane(key)
         now = time.monotonic()
@@ -3477,6 +4119,7 @@ def _pacer_note_429(conv, wait_seconds) -> None:
 def _turn(client: ArenaClient, content: str, conv: dict):
     """Send one message and stream the answer. Yields SSE events; returns {"a": text, "b": text},
     or None after sending an error event."""
+    conv["account_id"] = _client_account_id(client)
     v2 = None
     for _ in range(4):
         if conv["new"] and not conv.get("eval_id"):
@@ -3497,7 +4140,7 @@ def _turn(client: ArenaClient, content: str, conv: dict):
         permit = yield from _pacer_acquire(conv)
         try:
             r = _send(client, path, body)
-            _usage_note_send(conv)
+            _usage_note_send(conv, _client_account_id(client))
             LOG.info("chat %s: HTTP %s (v2 token sent: %s)", conv["chat_id"][:8], r.status_code, bool(body.get("recaptchaV2Token")))
             if r.status_code == 200:
                 conv["new"] = False
@@ -3507,18 +4150,18 @@ def _turn(client: ArenaClient, content: str, conv: dict):
                 conv["last_arena_ids"] = {"a": body.get("modelAMessageId"),
                                           "b": body.get("modelBMessageId")}
                 out = yield from _line_events(r, conv)
-                if _engine_on():
+                if _client_uses_engine(client):
                     ENGINE.sync_to(client)
                 return out
             err = contracts.classify_error(r.status_code, r.text if r.status_code else (r.error or ""),
                                            headers=getattr(r, "headers", None))
             if err["code"] == "rate_limit":
                 _pacer_note_429(conv, err.get("wait"))
-                _usage_note_429(conv, err)
+                _usage_note_429(conv, err, _client_account_id(client))
             LOG.info("chat %s: %s - %s", conv["chat_id"][:8], err.get("code"), str(err.get("message", ""))[:200])
-            if r.status_code == 0 and _engine_on() and ENGINE.challenge == "cloudflare":
+            if r.status_code == 0 and _client_uses_engine(client) and ENGINE.challenge == "cloudflare":
                 err["code"] = "cloudflare"
-            if err["code"] == "challenge" and _engine_on():
+            if err["code"] == "challenge" and _client_uses_engine(client):
                 ENGINE.request_human_check()
                 yield _sse({"type": "challenge", "kind": "recaptcha", "message": "arena.ai wants a quick human check. "
                             "Tick the box in the arena.ai window; your message is resent right after."})
@@ -3535,7 +4178,7 @@ def _turn(client: ArenaClient, content: str, conv: dict):
                 yield _sse({"type": "challenge_done"})
                 v2 = token
                 continue
-            if err["code"] == "cloudflare" and _engine_on():
+            if err["code"] == "cloudflare" and _client_uses_engine(client):
                 if ENGINE.ready():
                     ENGINE.show_cloudflare()
                 yield _sse({"type": "challenge", "kind": "cloudflare",
@@ -3832,13 +4475,19 @@ def _gateway_injection(data, cfg=None) -> str:
     if not _gateway_enabled(cfg) or cfg.get("gateway_auto") is not True:
         return ""
     if (data or {}).get("tools") is False:
+        LOG.info("gateway: auto-start skipped (Workspace Sync is off for this send)")
         return ""  # Workspace Sync is off in the composer
     servers = _gateway_servers(cfg)
     if not servers:
+        LOG.info("gateway: auto-start skipped (nothing to expose: no enabled MCP "
+                 "server selected and no workspace folder picked)")
         return ""
     mgr = _gateway()
     if mgr.summary()["state"] != "on":
-        mgr.start(servers, wait_seconds=20)
+        status = mgr.start(servers, wait_seconds=20)
+        if status.get("state") != "on":
+            LOG.info("gateway: auto-start did not come up (state=%s, error=%s)",
+                     status.get("state"), status.get("error"))
     return mgr.injection_block()
 
 
@@ -4315,8 +4964,8 @@ def _native_ask_user_hitl(pending: dict):
         "skipped": False, "questions": questions, "answers": display_answers}
 
 
-def _native_image_choice_hitl(pending: dict):
-    """Show native ``generate_image`` candidates and wait for one choice.
+def _native_media_choice_hitl(pending: dict):
+    """Show native image/voice candidates and wait for one choice.
 
     Returns ``(server_output, public_choice)``.  A timeout follows Arena's
     own no-choice path: the first candidate is reported with
@@ -4325,12 +4974,17 @@ def _native_image_choice_hitl(pending: dict):
     """
     chat_id = getattr(_tl, "chat_id", None) or pending.get("chat_id")
     entry = pending.get("entry") if isinstance(pending.get("entry"), dict) else {}
-    choice = native_agent.image_choice_from_output(
-        pending.get("output"), pending.get("input"))
+    tool = native_agent.normalize_tool_name(
+        pending.get("tool") or entry.get("tool") or "generate_image")
+    if tool not in ("generate_image", "add_voice"):
+        tool = "generate_image"
+    noun = "voice" if tool == "add_voice" else "image"
+    choice = native_agent.media_choice_from_output(
+        pending.get("output"), pending.get("input"), tool=tool)
     if not choice:
         entry.update({"ok": False, "status": "error"})
         yield _sse({"type": "notice", "model": "a",
-                    "text": "Arena Agent generated image candidates in a format Arena Desktop could not read."})
+                    "text": f"Arena Agent generated {noun} candidates in a format Arena Desktop could not read."})
         return None, {}
     choice_id = generate_uuidv7()
     public = _public_media_choice(
@@ -4339,24 +4993,27 @@ def _native_image_choice_hitl(pending: dict):
     public["status"] = "awaiting_user_response"
     public["selected_index"] = None
     public["selection_method"] = ""
+    summary_detail = public.get("text") if tool == "add_voice" else public.get("prompt")
+    if summary_detail:
+        summary_detail = str(summary_detail)[:160]
     entry.update({
-        "tool": "generate_image",
-        "summary": "Generate image" + (f": {public.get('prompt')}" if public.get("prompt") else ""),
+        "tool": tool,
+        "summary": native_agent.tool_display_name(tool) + (f": {summary_detail}" if summary_detail else ""),
         "status": "waiting",
         "ok": True,
         "media_choice": public,
     })
     with _media_choices_lock:
         _MEDIA_CHOICES[choice_id] = {
-            "id": choice_id, "chat_id": chat_id,
+            "id": choice_id, "chat_id": chat_id, "tool": tool,
             "tool_call_id": pending.get("tool_call_id"),
             "media_choice": copy.deepcopy(public), "answer": None,
         }
     yield _sse({"type": "media_choice", "id": choice_id, "model": "a",
-                "lane": "a", "chat_id": chat_id,
+                "lane": "a", "chat_id": chat_id, "tool": tool,
                 "tool_call_id": pending.get("tool_call_id"),
                 "media_choice": copy.deepcopy(public)})
-    _notify("Arena Desktop", "Arena Agent is waiting for you to choose an image.", "question")
+    _notify("Arena Desktop", f"Arena Agent is waiting for you to choose a {noun}.", "question")
     answer = yield from _wait_for(
         lambda choice_id=choice_id: _media_choice_answer(choice_id), QUESTION_TIMEOUT)
     with _media_choices_lock:
@@ -4385,6 +5042,10 @@ def _native_image_choice_hitl(pending: dict):
         "selected_index": selected_index,
         "selection_method": selection_method,
     })
+    if tool == "add_voice" and answer:
+        for key in ("play_counts", "listen_seconds", "voice_id"):
+            if answer.get(key) not in (None, ""):
+                public[key] = copy.deepcopy(answer[key])
     entry.update({"media_choice": public, "status": "waiting", "ok": True})
     server_candidates = []
     for candidate in choice.get("candidates") or []:
@@ -4396,12 +5057,26 @@ def _native_image_choice_hitl(pending: dict):
         "status": "completed",
         "candidates": server_candidates,
         "selected_index": selected_index,
-        "file_path": choice.get("file_path") or "",
         "selection_method": selection_method,
     }
-    if choice.get("attribution"):
-        server_output["attribution"] = choice["attribution"]
+    if tool == "generate_image":
+        server_output["file_path"] = choice.get("file_path") or ""
+        if choice.get("attribution"):
+            server_output["attribution"] = choice["attribution"]
+    else:
+        voice_id = (answer or {}).get("voice_id") or choice.get("voice_id")
+        if voice_id:
+            server_output["voice_id"] = voice_id
+            public["voice_id"] = voice_id
+        if answer:
+            for key in ("play_counts", "listen_seconds"):
+                if isinstance(answer.get(key), list):
+                    server_output[key] = copy.deepcopy(answer[key])
     return server_output, public
+
+
+# Backwards-compatible alias for older imports/tests.
+_native_image_choice_hitl = _native_media_choice_hitl
 
 
 def _native_apply_media_reveal(result: dict, event: dict) -> Optional[dict]:
@@ -4414,6 +5089,8 @@ def _native_apply_media_reveal(result: dict, event: dict) -> Optional[dict]:
     fallback = None
     for entry in tools or []:
         if not isinstance(entry, dict) or not isinstance(entry.get("media_choice"), dict):
+            continue
+        if entry["media_choice"].get("kind") == "voice" or entry.get("tool") == "add_voice":
             continue
         fallback = entry
         if wanted and entry["media_choice"].get("tool_call_id") == wanted:
@@ -4638,8 +5315,8 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
             if tool_name == "ask_user":
                 output, display = yield from _native_ask_user_hitl(pending)
                 pending["display"] = display
-            elif tool_name == "generate_image":
-                output, public = yield from _native_image_choice_hitl(pending)
+            elif tool_name in ("generate_image", "add_voice"):
+                output, public = yield from _native_media_choice_hitl(pending)
                 pending["public_choice"] = public
             else:
                 entry.update({"ok": False, "status": "error"})
@@ -4707,9 +5384,11 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
                 display = pending.get("display") or {}
                 output_text = ("Skipped" if display.get("skipped")
                                else "\n".join(display.get("answers") or []))
-            elif pending.get("tool") == "generate_image":
+            elif pending.get("tool") in ("generate_image", "add_voice"):
                 public = pending.get("public_choice") or {}
-                output_text = f"Selected image {(public.get('selected_index') or 0) + 1}"
+                noun = "voice" if pending.get("tool") == "add_voice" else "image"
+                selected = public.get("selected_index")
+                output_text = f"Selected {noun} {(selected or 0) + 1}" if selected is not None else f"Selected {noun}"
             else:
                 output_text = ""
             yield _sse({
@@ -4832,7 +5511,7 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
                     break
                 if native_agent.is_control(chunk):
                     continue
-                for event in native_agent.map_chunk(chunk, tool_names):
+                for event in native_agent.map_chunk(chunk, tool_names, tool_inputs):
                     if event["type"] == "text":
                         result["text"] += event["text"]
                     elif event["type"] == "reasoning":
@@ -5155,6 +5834,175 @@ def _fresh_client(client):
         return client
 
 
+# ----------------------------------------------------------------------
+# Account-session scheduler for background child chats.
+#
+# Interactive chats and the native Arena Agent remain on the current
+# account and its one visible browser engine.  When the user explicitly
+# enables this, only newly-created delegate/fan-out child chats are leased
+# to a least-busy saved account.  Existing Arena conversations never move
+# accounts, and this scheduler never triggers on (or rotates around) a
+# daily-limit response: account failover is a separate opt-in below.
+_ACCOUNT_SESSION_LOCK = threading.Lock()
+_ACCOUNT_SESSION_ACTIVE: dict = {}
+_ACCOUNT_SESSION_TOTAL: dict = {}
+_ACCOUNT_SESSION_CURSOR = 0
+
+
+class _AccountClientLease:
+    __slots__ = ("client", "account_id", "account_name", "released")
+
+    def __init__(self, client, account_id, account_name=""):
+        self.client = client
+        self.account_id = str(account_id or "current")
+        self.account_name = account_name or ""
+        self.released = False
+
+    def release(self):
+        if self.released:
+            return
+        self.released = True
+        with _ACCOUNT_SESSION_LOCK:
+            remaining = int(_ACCOUNT_SESSION_ACTIVE.get(self.account_id) or 0) - 1
+            if remaining > 0:
+                _ACCOUNT_SESSION_ACTIVE[self.account_id] = remaining
+            else:
+                _ACCOUNT_SESSION_ACTIVE.pop(self.account_id, None)
+
+
+def _multi_session_subagents_on() -> bool:
+    try:
+        return load_config().get("multi_session_subagents") is True
+    except Exception:
+        return False
+
+
+def _account_session_candidates(store=None):
+    store = store if store is not None else _accounts_load()
+    return [record for record in store.get("accounts") or []
+            if record.get("id") and (record.get("cookie") or "")
+            and not record.get("expired")]
+
+
+def _tag_account_client(client, record):
+    account_id = str((record or {}).get("id") or _current_account_id() or "current")
+    account_name = str((record or {}).get("name") or (record or {}).get("email") or "")
+    try:
+        client._arena_account_id = account_id
+        client._arena_account_name = account_name
+    except Exception:
+        pass
+    return client
+
+
+def _account_client_for(record, parent_client):
+    account_id = str(record.get("id") or "")
+    client = ArenaClient(
+        cookie_str=record.get("cookie") or "", allow_cdp=False,
+        cookie_sink=lambda cookie, aid=account_id: _sync_account_cookie(aid, cookie))
+    client.active_mode = getattr(parent_client, "active_mode", client.active_mode)
+    client.active_modality = getattr(parent_client, "active_modality", client.active_modality)
+    return _tag_account_client(client, record)
+
+
+def _acquire_account_client(parent_client):
+    """Lease an account-bound client for one background child chat."""
+    global _ACCOUNT_SESSION_CURSOR
+    store = _accounts_load()
+    current_id = str(store.get("current") or "current")
+    candidates = _account_session_candidates(store)
+    enabled = _multi_session_subagents_on()
+    record = None
+    if enabled and len(candidates) >= 2:
+        with _ACCOUNT_SESSION_LOCK:
+            indexed = list(enumerate(candidates))
+
+            def rank(item):
+                index, candidate = item
+                account_id = str(candidate.get("id"))
+                return (
+                    int(_ACCOUNT_SESSION_ACTIVE.get(account_id) or 0),
+                    1 if account_id == current_id else 0,
+                    (index - _ACCOUNT_SESSION_CURSOR) % len(indexed),
+                )
+
+            selected_index, record = min(indexed, key=rank)
+            _ACCOUNT_SESSION_CURSOR = selected_index + 1
+            account_id = str(record.get("id"))
+            _ACCOUNT_SESSION_ACTIVE[account_id] = int(_ACCOUNT_SESSION_ACTIVE.get(account_id) or 0) + 1
+            _ACCOUNT_SESSION_TOTAL[account_id] = int(_ACCOUNT_SESSION_TOTAL.get(account_id) or 0) + 1
+    else:
+        record = next((item for item in candidates if str(item.get("id")) == current_id), None) \
+            or {"id": current_id, "name": "Current account"}
+        account_id = str(record.get("id") or current_id)
+        with _ACCOUNT_SESSION_LOCK:
+            _ACCOUNT_SESSION_ACTIVE[account_id] = int(_ACCOUNT_SESSION_ACTIVE.get(account_id) or 0) + 1
+            _ACCOUNT_SESSION_TOTAL[account_id] = int(_ACCOUNT_SESSION_TOTAL.get(account_id) or 0) + 1
+
+    account_id = str(record.get("id") or current_id)
+    account_name = str(record.get("name") or record.get("email") or "")
+    lease = _AccountClientLease(None, account_id, account_name)
+    try:
+        if enabled and account_id != current_id:
+            lease.client = _account_client_for(record, parent_client)
+        else:
+            lease.client = _tag_account_client(_fresh_client(parent_client), record)
+    except Exception:
+        LOG.exception("account session client failed; using the current account")
+        lease.release()
+        current_record = next((item for item in candidates if str(item.get("id")) == current_id), None) \
+            or {"id": current_id, "name": "Current account"}
+        with _ACCOUNT_SESSION_LOCK:
+            _ACCOUNT_SESSION_ACTIVE[current_id] = int(_ACCOUNT_SESSION_ACTIVE.get(current_id) or 0) + 1
+            _ACCOUNT_SESSION_TOTAL[current_id] = int(_ACCOUNT_SESSION_TOTAL.get(current_id) or 0) + 1
+        return _AccountClientLease(
+            _tag_account_client(_fresh_client(parent_client), current_record),
+            current_id,
+            str(current_record.get("name") or current_record.get("email") or ""))
+    return lease
+
+
+def _account_sessions_status() -> dict:
+    store = _accounts_load()
+    current_id = store.get("current")
+    valid_ids = {str(record.get("id")) for record in _account_session_candidates(store)}
+    with _ACCOUNT_SESSION_LOCK:
+        active = dict(_ACCOUNT_SESSION_ACTIVE)
+        total = dict(_ACCOUNT_SESSION_TOTAL)
+    accounts = []
+    for record in store.get("accounts") or []:
+        public = _account_public(record, current_id)
+        account_id = str(record.get("id") or "")
+        public.update({
+            "has_session": account_id in valid_ids,
+            "active_children": int(active.get(account_id) or 0),
+            "leased_children": int(total.get(account_id) or 0),
+        })
+        accounts.append(public)
+    return {
+        "enabled": _multi_session_subagents_on(),
+        "available": len(valid_ids) >= 2,
+        "current_account": current_id,
+        "scope": "new_subagent_and_fanout_child_chats",
+        "interactive_account": "current",
+        "accounts": accounts,
+    }
+
+
+@app.route("/api/account-sessions")
+def api_account_sessions():
+    return jsonify(_account_sessions_status())
+
+
+def _run_subagent_scheduled(parent_client, parent_conv: dict, call: dict, lane: str, child_id: str):
+    lease = _acquire_account_client(parent_client)
+    try:
+        result = yield from _run_subagent(lease.client, parent_conv, call, lane, child_id)
+        return result
+    finally:
+        lease.release()
+
+
 def _run_parallel_research(client, conv, call, partner, lane, child_id, precomputed):
     """Run two read-only sub-agents concurrently; yields SSE events.
 
@@ -5179,7 +6027,7 @@ def _run_parallel_research(client, conv, call, partner, lane, child_id, precompu
             setattr(_tl, k, v)
         _tl.error = None
         try:
-            gen = _run_subagent(_fresh_client(client), conv, c, lane, cid)
+            gen = _run_subagent_scheduled(client, conv, c, lane, cid)
             while True:
                 try:
                     events_q.put(next(gen))
@@ -5242,7 +6090,7 @@ def _run_children_pair(client, conv: dict, jobs: list, lane: str):
             setattr(_tl, k, v)
         _tl.error = None
         try:
-            gen = _run_subagent(_fresh_client(client), conv, c, lane, cid)
+            gen = _run_subagent_scheduled(client, conv, c, lane, cid)
             while True:
                 try:
                     events_q.put(next(gen))
@@ -5298,7 +6146,7 @@ def _fanout_run(client, message: str, conv: dict, fanout_models: list):
         if len(jobs) == 2:  # two models at a time - same Arena-friendly cap
             results = yield from _run_children_pair(client, conv, jobs, "a")
         else:
-            results = [(yield from _run_subagent(client, conv, jobs[0][0], "a", jobs[0][1]))]
+            results = [(yield from _run_subagent_scheduled(client, conv, jobs[0][0], "a", jobs[0][1]))]
         for (mid, info), (ok, status, output, extra) in zip(infos, results):
             conv.setdefault("tools", []).append(
                 {"tool": "delegate_task", "summary": info["summary"], "lane": "a", "diff": None,
@@ -5324,7 +6172,7 @@ def _fanout_run(client, message: str, conv: dict, fanout_models: list):
                 "summary": "Comparing the answers", "child_id": child_id,
                 "inside": True, "path": task[:400]}
         yield _sse(dict(info, type="tool_call"))
-        ok, status, output, extra = yield from _run_subagent(client, conv, call, "a", child_id)
+        ok, status, output, extra = yield from _run_subagent_scheduled(client, conv, call, "a", child_id)
         conv.setdefault("tools", []).append(
             {"tool": "delegate_task", "summary": info["summary"], "lane": "a", "diff": None,
              "ok": ok, "status": status, "child_id": extra.get("child_id"),
@@ -5414,7 +6262,11 @@ def _run_subagent(client, parent_conv: dict, call: dict, lane: str, child_id: st
         smode = "research"
     model_id, model_name, auto = _resolve_delegate_model(
         params.get("model"), "work" if params.get("fanout") else params.get("mode"))
-    extra.update({"model": model_name, "mode": smode, "task": task[:300]})
+    execution_account_id = _client_account_id(client)
+    execution_account_name = str(getattr(client, "_arena_account_name", "") or "")
+    extra.update({"model": model_name, "mode": smode, "task": task[:300],
+                  "account_id": execution_account_id,
+                  "account_name": execution_account_name})
     with _subagent_lock:
         ran = int(parent_conv.get("subagents_run") or 0)
         if ran >= MAX_SUBAGENTS and not (call.get("params") or {}).get("fanout"):
@@ -5438,7 +6290,8 @@ def _run_subagent(client, parent_conv: dict, call: dict, lane: str, child_id: st
     child_history = [{"role": "user", "text": child_message}]
     child_conv = {"eval_id": None, "new": True, "mode": contracts.api_mode("direct"),
                   "modality": contracts.api_modality("text"), "model_a": model_id,
-                  "model_b": None, "chat_id": child_id, "auto_model": bool(auto),
+                  "model_b": None, "chat_id": child_id, "account_id": execution_account_id,
+                  "auto_model": bool(auto),
                   "reasoning": {"a": "", "b": ""}, "lane_errors": {"a": [], "b": []},
                   "attachments": None, "guide_sent": False, "mcp_guide_hash": None,
                   "memory_hash": None, "title": title, "tools": [],
@@ -5456,9 +6309,11 @@ def _run_subagent(client, parent_conv: dict, call: dict, lane: str, child_id: st
     try:
         _save_chat(child_id, title=title, messages=list(child_history), mode="direct",
                    modality="text", model_a=model_id, model_b=None, eval_id=None,
-                   parent_id=parent_conv.get("chat_id"))
+                   parent_id=parent_conv.get("chat_id"), account_id=execution_account_id)
         yield _sse({"type": "subagent", "status": "started", "child_id": child_id,
-                    "task": task[:300], "model_name": model_name, "mode": smode, "lane": lane})
+                    "task": task[:300], "model_name": model_name, "mode": smode, "lane": lane,
+                    "account_id": execution_account_id,
+                    "account_name": execution_account_name})
         gen = _agent_run(client, prefix + child_message, child_conv)
         deadline = time.time() + CHILD_TIME_BUDGET
         while True:
@@ -5516,7 +6371,8 @@ def _run_subagent(client, parent_conv: dict, call: dict, lane: str, child_id: st
                        modality="text", model_a=model_id, model_b=None,
                        eval_id=(child_conv.get("eval_id") if not child_conv.get("new") else None),
                        tools_guide=True, parent_id=parent_conv.get("chat_id"),
-                       mcp_guide_hash=child_conv.get("mcp_guide_hash"))
+                       mcp_guide_hash=child_conv.get("mcp_guide_hash"),
+                       account_id=execution_account_id)
         except Exception:
             LOG.exception("sub-agent chat save failed")
         _generation_finished(child_id)
@@ -5528,7 +6384,9 @@ def _run_subagent(client, parent_conv: dict, call: dict, lane: str, child_id: st
                   f"{f' ({child_error})' if child_error else ''}. "
                   f"Its chat is saved as \u201c{title}\u201d.")
     yield _sse({"type": "subagent", "status": "done", "child_id": child_id,
-                "ok": ok, "model_name": model_name, "mode": smode, "lane": lane})
+                "ok": ok, "model_name": model_name, "mode": smode, "lane": lane,
+                "account_id": execution_account_id,
+                "account_name": execution_account_name})
     if not params.get("fanout"):
         # The parent model needs the id to manage (e.g. delete) this chat.
         output = f"[sub-agent chat: {child_id}]\n{output}"
@@ -5910,7 +6768,7 @@ def _agent_run(client: ArenaClient, message: str, conv: dict):
                             ok, status, output, extra = yield from _run_parallel_research(
                                 client, conv, call, partner, l, child_id, precomputed)
                         else:
-                            ok, status, output, extra = yield from _run_subagent(client, conv, call, l, child_id)
+                            ok, status, output, extra = yield from _run_subagent_scheduled(client, conv, call, l, child_id)
                     outcomes.append((call, status, output))
                     if extra.get("mode") == "work":
                         conv.pop("_output_cache", None)  # child may have edited files
@@ -6108,6 +6966,131 @@ def _attachment_media_type(filename: str, declared: str) -> str:
     return declared or by_ext or "application/octet-stream"
 
 
+def _sniff_attachment_media_type(data: bytes) -> Optional[str]:
+    """Identify binary attachments from content, not from a spoofable name."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data.startswith(b"%PDF-"):
+        return "application/pdf"
+    return None
+
+
+def _prepare_image_upload(filename: str, media_type: str, data: bytes):
+    """Validate and, only when needed, normalise an image before Arena storage.
+
+    Returns ``(filename, media_type, data, metadata, error)``.  Ordinary PNG,
+    JPEG and WebP screenshots are returned byte-for-byte.  A transcode is
+    reserved for a wrong content-declared type, an EXIF rotation that Arena
+    may ignore, colour modes many model gateways reject, an unsupported
+    still-image format, or extreme dimensions.  Metadata is diagnostic only:
+    format/dimensions/mode and reason codes, never file content or secrets.
+    """
+    sniffed = _sniff_attachment_media_type(data)
+    if sniffed == "application/pdf":
+        return filename, sniffed, data, {"format": "PDF", "normalized": False}, None
+    if sniffed and sniffed.startswith("image/"):
+        media_type = sniffed
+    elif media_type.startswith("image/"):
+        return filename, media_type, data, None, (
+            "That file does not look like a supported PNG, JPEG, WebP or GIF image. "
+            "Save the screenshot again in one of those formats and attach it.")
+    else:
+        return filename, media_type, data, None, None
+
+    try:
+        from PIL import Image, ImageOps, UnidentifiedImageError
+    except Exception:
+        # Pillow is a packaged dependency, but do not make uploads unusable
+        # in a source checkout where it has not been installed yet.
+        return filename, media_type, data, {"normalized": False, "inspection": "unavailable"}, None
+
+    ext_by_media = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+            fmt = (image.format or "").upper()
+            width, height = image.size
+            mode = image.mode or ""
+            animated = bool(getattr(image, "is_animated", False) and getattr(image, "n_frames", 1) > 1)
+            orientation = None
+            try:
+                orientation = image.getexif().get(274)
+            except Exception:
+                orientation = None
+            meta = {
+                "format": fmt or media_type.rsplit("/", 1)[-1].upper(),
+                "width": width,
+                "height": height,
+                "mode": mode,
+                "animated": animated,
+                "normalized": False,
+            }
+            if animated:
+                return filename, media_type, data, meta, None
+
+            reasons = []
+            if fmt not in {"PNG", "JPEG", "WEBP", "GIF"}:
+                reasons.append("unsupported_format")
+            if orientation not in (None, 1):
+                reasons.append("exif_orientation")
+            if mode in {"CMYK", "YCCK", "P", "PA", "LA", "La", "I", "I;16", "F"}:
+                reasons.append("colour_mode")
+            extreme = max(width, height) > 8192 or (width * height) > 50_000_000
+            if extreme:
+                reasons.append("extreme_dimensions")
+
+            expected_ext = ext_by_media.get(media_type)
+            current_ext = Path(filename or "").suffix.lower()
+            if expected_ext and current_ext not in ({".jpg", ".jpeg"} if expected_ext == ".jpg" else {expected_ext}):
+                filename = f"{Path(filename or 'image').stem or 'image'}{expected_ext}"
+                meta["filename_corrected"] = True
+            if not reasons:
+                return filename, media_type, data, meta, None
+
+            prepared = ImageOps.exif_transpose(image)
+            if "transparency" in prepared.info and prepared.mode == "P":
+                prepared = prepared.convert("RGBA")
+            elif prepared.mode in {"CMYK", "YCCK"}:
+                prepared = prepared.convert("RGB")
+            elif prepared.mode in {"P", "PA", "I", "I;16", "F"}:
+                prepared = prepared.convert("RGB")
+            elif prepared.mode in {"LA", "La"}:
+                prepared = prepared.convert("RGBA")
+            if extreme:
+                prepared.thumbnail((4096, 4096), Image.Resampling.LANCZOS)
+
+            use_jpeg = fmt == "JPEG" and prepared.mode not in {"RGBA", "LA", "PA"}
+            output = io.BytesIO()
+            if use_jpeg:
+                if prepared.mode != "RGB":
+                    prepared = prepared.convert("RGB")
+                prepared.save(output, format="JPEG", quality=92, optimize=True)
+                media_type = "image/jpeg"
+                out_ext = ".jpg"
+            else:
+                prepared.save(output, format="PNG", optimize=True)
+                media_type = "image/png"
+                out_ext = ".png"
+            filename = f"{Path(filename or 'image').stem or 'image'}{out_ext}"
+            meta.update({"normalized": True, "reasons": reasons,
+                         "output_width": prepared.width, "output_height": prepared.height,
+                         "output_mode": prepared.mode})
+            return filename, media_type, output.getvalue(), meta, None
+    except UnidentifiedImageError:
+        return filename, media_type, data, None, (
+            "That image could not be read. Save it again as PNG or JPEG and attach the new file.")
+    except Exception:
+        return filename, media_type, data, None, (
+            "That image appears to be damaged or uses an unsupported encoding. "
+            "Save it again as PNG or JPEG and attach the new file.")
+
+
 def _validate_upload(kind: str, media_type: str, size: int, modality: str) -> Optional[str]:
     """Mirror Arena's attachment rules; returns a friendly refusal or None."""
     if kind == "agent":
@@ -6134,7 +7117,11 @@ def _storage_put(upload_url: str, data: bytes, media_type: str) -> Optional[str]
         resp = requests.put(upload_url, data=data,
                             headers={"Content-Type": media_type}, timeout=180)
     except requests.RequestException as e:
-        return f"Upload failed: {e}"
+        _tl.upload_storage_status = 0
+        # Request exception strings can embed the presigned URL.  Surface the
+        # failure class only; diagnostics keeps status/stage separately.
+        return f"Upload failed ({type(e).__name__}). Check the connection and try again."
+    _tl.upload_storage_status = resp.status_code
     if resp.status_code not in (200, 201, 204):
         return f"Arena storage refused the upload (HTTP {resp.status_code})."
     return None
@@ -6148,51 +7135,102 @@ def api_uploads():
     kind=agent: content-addressed PUT -> {filename, mediaType, url} where url
     is Arena's /api/chat/workspace/cas/user/<sha256> path the Agent reads.
     """
-    client = get_client()
-    if not _signed_in_somewhere(client):
-        return jsonify({"error": "Not signed in. Press Sign in first.", "code": "auth"}), 401
     kind = (request.form.get("kind") or "evaluation").strip().lower()
     if kind not in ("evaluation", "agent"):
         kind = "evaluation"
     modality = (request.form.get("modality") or "").strip().lower()
     upload = request.files.get("file")
+    diag = {
+        "id": uuid.uuid4().hex[:10],
+        "kind": kind,
+        "app_mode": request.form.get("app_mode") or "",
+        "modality": modality,
+        "source": request.form.get("source") or "",
+        "attempt": request.form.get("attempt") or 1,
+        "declared_type": (upload.mimetype or "") if upload is not None else "",
+        "extension": Path(upload.filename or "").suffix if upload is not None else "",
+    }
+
+    def fail(stage, status, code, message, arena_status=None, storage_status=None):
+        entry = _record_upload_diagnostic(
+            diag, stage=stage, outcome="error", http_status=status, code=code,
+            arena_status=arena_status, storage_status=storage_status)
+        return jsonify({"error": message, "code": code,
+                        "diagnostic_id": entry["id"], "stage": stage}), status
+
+    def succeed(payload, arena_status=None, storage_status=None):
+        entry = _record_upload_diagnostic(
+            diag, stage="complete", outcome="ok", http_status=200, code="ok",
+            arena_status=arena_status, storage_status=storage_status)
+        payload = dict(payload)
+        payload["diagnostic_id"] = entry["id"]
+        payload["stage"] = "complete"
+        return jsonify(payload)
+
+    client = get_client()
+    if not _signed_in_somewhere(client):
+        return fail("auth", 401, "auth", "Not signed in. Press Sign in first.")
     if upload is None:
-        return jsonify({"error": "No file was sent.", "code": "bad_request"}), 400
+        return fail("received", 400, "bad_request", "No file was sent.")
     filename = Path(upload.filename or "file").name or "file"
     data = upload.read()
+    diag["bytes_in"] = len(data)
+    diag["bytes_out"] = len(data)
+    diag["detected_type"] = _sniff_attachment_media_type(data) or ""
     if not data:
-        return jsonify({"error": "That file is empty.", "code": "bad_request"}), 400
+        return fail("sniff", 400, "bad_request", "That file is empty.")
     media_type = _attachment_media_type(filename, upload.mimetype or "")
+    diag["resolved_type"] = media_type
+    filename, media_type, data, image_meta, preparation_error = _prepare_image_upload(filename, media_type, data)
+    diag["resolved_type"] = media_type
+    diag["bytes_out"] = len(data)
+    diag["image"] = image_meta
+    if preparation_error:
+        return fail("prepare", 400, "invalid_image", preparation_error)
     refusal = _validate_upload(kind, media_type, len(data), modality)
     if refusal:
-        return jsonify({"error": refusal, "code": "unsupported_attachment"}), 400
+        return fail("validate", 400, "unsupported_attachment", refusal)
     if kind == "agent":
         digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("=")
-        minted, error, _ = _arena_post_json(
+        minted, error, arena_status = _arena_post_json(
             contracts.PATHS["storage_agent_upload_url"],
             {"hash": digest, "contentType": media_type, "size": len(data)}, timeout=60)
         if error or not isinstance(minted, dict) or not minted.get("uploadUrl"):
-            return jsonify({"error": error or "Arena did not accept the file.", "code": "arena_upload"}), 502
+            return fail("mint_upload", 502, "arena_upload",
+                        error or "Arena did not accept the file.", arena_status=arena_status)
+        _tl.upload_storage_status = None
         put_error = _storage_put(minted["uploadUrl"], data, media_type)
+        storage_status = getattr(_tl, "upload_storage_status", None)
         if put_error:
-            return jsonify({"error": put_error, "code": "arena_upload"}), 502
-        return jsonify({"ok": True, "kind": "agent", "filename": filename, "mediaType": media_type,
+            return fail("storage_put", 502, "arena_upload", put_error,
+                        arena_status=arena_status, storage_status=storage_status)
+        return succeed({"ok": True, "kind": "agent", "filename": filename, "mediaType": media_type,
+                        "contentType": media_type, "name": filename,
                         "url": f"/api/chat/workspace/cas/user/{digest}",
-                        "size": len(data), "hash": digest})
-    minted, error, _ = _arena_post_json(
+                        "size": len(data), "hash": digest, "image": image_meta},
+                       arena_status=arena_status, storage_status=storage_status)
+    minted, error, arena_status = _arena_post_json(
         contracts.PATHS["storage_upload_url"],
         {"fileName": filename, "contentType": media_type}, timeout=60)
     if error or not isinstance(minted, dict) or not minted.get("uploadUrl") or not minted.get("key"):
-        return jsonify({"error": error or "Arena did not accept the file.", "code": "arena_upload"}), 502
+        return fail("mint_upload", 502, "arena_upload",
+                    error or "Arena did not accept the file.", arena_status=arena_status)
+    _tl.upload_storage_status = None
     put_error = _storage_put(minted["uploadUrl"], data, media_type)
+    storage_status = getattr(_tl, "upload_storage_status", None)
     if put_error:
-        return jsonify({"error": put_error, "code": "arena_upload"}), 502
-    signed, error, _ = _arena_post_json(
+        return fail("storage_put", 502, "arena_upload", put_error,
+                    arena_status=arena_status, storage_status=storage_status)
+    signed, error, signed_status = _arena_post_json(
         contracts.PATHS["storage_signed_url"], {"key": minted["key"]}, timeout=60)
     if error or not isinstance(signed, dict) or not signed.get("url"):
-        return jsonify({"error": error or "Arena did not return a file link.", "code": "arena_upload"}), 502
-    return jsonify({"ok": True, "kind": "evaluation", "name": filename, "contentType": media_type,
-                    "url": signed["url"], "size": len(data)})
+        return fail("signed_url", 502, "arena_upload",
+                    error or "Arena did not return a file link.",
+                    arena_status=signed_status, storage_status=storage_status)
+    return succeed({"ok": True, "kind": "evaluation", "name": filename, "filename": filename,
+                    "contentType": media_type, "mediaType": media_type,
+                    "url": signed["url"], "size": len(data), "image": image_meta},
+                   arena_status=signed_status, storage_status=storage_status)
 
 
 def _request_attachments(data: dict, native_agent_files: bool):
@@ -6322,7 +7360,7 @@ def _api_chat_impl():
         # Never gate Agent on Max.  Prefer an ordinary selectable text model
         # internally; if the catalog is unavailable, build_chat(auto_model)
         # lets Arena assign one.  The chosen ID/name is not shown in Agent UI.
-        auto = _auto_agent_model()
+        auto = _auto_agent_model(required_inputs=_attachment_kinds(data.get("attachments")))
         model_a = auto.get("model_id", auto.get("id")) if auto else None
     else:
         if not model_a:
@@ -6330,6 +7368,9 @@ def _api_chat_impl():
         allowed_ids = _allowed_model_ids(_ui_mode, _ui_modality)
         if allowed_ids and str(model_a) not in allowed_ids:
             return jsonify({"error": "That model is not available for this mode and modality in Arena's catalog.",
+                            "code": "unsupported_selection"}), 400
+        if fanout_models and allowed_ids and any(str(mid) not in allowed_ids for mid in fanout_models):
+            return jsonify({"error": "One fan-out model is not available for this mode and modality in Arena's catalog.",
                             "code": "unsupported_selection"}), 400
         if _ui_mode == "direct" and model_b:
             return jsonify({"error": "Direct mode accepts exactly one model.", "code": "unsupported_selection"}), 400
@@ -6359,6 +7400,18 @@ def _api_chat_impl():
     turn_attachments, attachment_error = _request_attachments(data, native_turn)
     if attachment_error:
         return jsonify({"error": attachment_error, "code": "unsupported_attachment"}), 400
+    if turn_attachments and _ui_mode in ("direct", "side-by-side"):
+        attachment_targets = []
+        if _ui_mode == "direct" and fanout_models:
+            attachment_targets.extend((mid, "A fan-out model") for mid in fanout_models)
+        else:
+            attachment_targets.append((model_a, "Model A" if _ui_mode == "side-by-side" else "The selected model"))
+        if _ui_mode == "side-by-side":
+            attachment_targets.append((model_b, "Model B"))
+        for target_id, target_label in attachment_targets:
+            model_error = _model_attachment_error(target_id, turn_attachments, target_label)
+            if model_error:
+                return jsonify({"error": model_error, "code": "unsupported_attachment_model"}), 400
     if _ui_mode == "agent" and agent_backend == "arena":
         tz = data.get("timezone") if isinstance(data.get("timezone"), str) else None
         title = existing.get("title") or message[:50]
@@ -6496,9 +7549,18 @@ def _api_chat_impl():
         existing_pair = (existing_pair[0], "text")
     same = bool(existing) and existing_pair == (_ui_mode, _ui_modality)
     if _ui_mode == "agent" and same:
-        preferred = _auto_agent_model(existing.get("model_a"))
+        preferred = _auto_agent_model(existing.get("model_a"),
+                                      required_inputs=_attachment_kinds(turn_attachments))
         if preferred:
             model_a = preferred.get("model_id", preferred.get("id"))
+    if _ui_mode == "agent" and agent_backend == "local" and turn_attachments:
+        if not model_a:
+            return jsonify({"error": "No available Agent model accepts this attachment. "
+                            "Remove the attachment or try again after the model catalog refreshes.",
+                            "code": "unsupported_attachment_model"}), 400
+        model_error = _model_attachment_error(model_a, turn_attachments, "The automatic Agent model")
+        if model_error:
+            return jsonify({"error": model_error, "code": "unsupported_attachment_model"}), 400
     eval_id = existing.get("eval_id") if same else None
     wire_attachments = [
         {key: item[key] for key in ("name", "contentType", "url") if item.get(key)}
@@ -7122,6 +8184,225 @@ def api_workspace_open():
         return jsonify({"ok": False, "error": "Opening folders works on Windows only.", "path": str(root)}), 400
     os.startfile(str(root))
     return jsonify({"ok": True})
+
+
+# ---------- Workspace Git panel ----------
+# Deliberately narrow: status/diff/stage/unstage/commit inside the folder
+# already selected as Workspace.  No shell, no push/pull, no branch changes,
+# and no operation on a parent repository when Workspace is only a subfolder.
+
+_GIT_DIFF_LIMIT = 200_000
+_GIT_MAX_PATHS = 250
+
+
+class _GitError(RuntimeError):
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.status = status
+
+
+def _git_run(root: Path, args, check=True, timeout=30):
+    executable = shutil.which("git")
+    if not executable:
+        raise _GitError("Git is not installed or is not available on PATH.", 501)
+    env = dict(os.environ)
+    env.update({"GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"})
+    try:
+        result = subprocess.run(
+            [executable, "-C", str(root), *args],
+            cwd=str(root), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        raise _GitError(f"Git {' '.join(args[:2])} timed out.", 408)
+    except OSError as exc:
+        raise _GitError(f"Could not run Git: {exc}", 500)
+    if check and result.returncode != 0:
+        detail = (result.stderr or result.stdout or "Git command failed.").strip()
+        raise _GitError(detail[:1200] or "Git command failed.", 400)
+    return result
+
+
+def _git_repo_root() -> Path:
+    root = _panel_workspace_root()
+    if not root.is_dir():
+        raise _GitError("Choose an existing Workspace folder first.", 400)
+    result = _git_run(root, ["rev-parse", "--show-toplevel"], check=False)
+    if result.returncode != 0:
+        raise _GitError("The selected Workspace folder is not a Git repository.", 404)
+    top = Path(result.stdout.strip()).expanduser().resolve()
+    if top != root:
+        raise _GitError(
+            "The Git panel works only when the selected Workspace is the repository root. "
+            f"Select {top} as the Workspace folder to use it.", 400)
+    return root
+
+
+def _git_validate_paths(values, root: Path):
+    if not isinstance(values, list) or not values:
+        raise _GitError("Choose at least one file.", 400)
+    if len(values) > _GIT_MAX_PATHS:
+        raise _GitError(f"Choose no more than {_GIT_MAX_PATHS} files at a time.", 400)
+    paths = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip() or value.strip() == ".":
+            raise _GitError("One Git path is empty or invalid.", 400)
+        try:
+            target, checked_root = _workspace_panel_path(value)
+        except PermissionError as exc:
+            raise _GitError(str(exc), 403)
+        if checked_root != root or target == root:
+            raise _GitError("Git paths must name files or folders inside the Workspace.", 400)
+        rel = target.relative_to(root).as_posix()
+        if rel not in paths:
+            paths.append(rel)
+    return paths
+
+
+def _git_status_payload(root: Path):
+    branch = _git_run(root, ["branch", "--show-current"]).stdout.strip()
+    detached = not branch
+    if detached:
+        head = _git_run(root, ["rev-parse", "--short", "HEAD"], check=False)
+        branch = head.stdout.strip() or "No commits yet"
+
+    raw = _git_run(root, ["status", "--porcelain=v1", "-z", "--untracked-files=normal"]).stdout
+    records = [part for part in raw.split("\0") if part]
+    files = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if len(record) < 4:
+            continue
+        x_status, y_status = record[0], record[1]
+        path = record[3:]
+        original = None
+        if x_status in "RC" or y_status in "RC":
+            if index < len(records):
+                original = records[index]
+                index += 1
+        untracked = x_status == "?" and y_status == "?"
+        conflict = (x_status == "U" or y_status == "U" or
+                    (x_status + y_status) in {"AA", "DD"})
+        files.append({
+            "path": path,
+            "orig_path": original,
+            "index_status": x_status,
+            "worktree_status": y_status,
+            "staged": bool(not untracked and x_status not in (" ", "?")),
+            "unstaged": bool(not untracked and y_status not in (" ", "?")),
+            "untracked": untracked,
+            "conflict": conflict,
+        })
+
+    commits = []
+    log = _git_run(root, ["log", "-5", "--pretty=format:%H%x1f%h%x1f%s%x1f%cr%x1e"], check=False)
+    if log.returncode == 0:
+        for chunk in log.stdout.split("\x1e"):
+            Fields = chunk.strip("\n").split("\x1f")
+            if len(Fields) == 4 and Fields[0]:
+                commits.append({"hash": Fields[0], "short_hash": Fields[1],
+                                "subject": Fields[2], "relative_time": Fields[3]})
+    staged_count = sum(1 for item in files if item["staged"])
+    unstaged_count = sum(1 for item in files if item["unstaged"])
+    untracked_count = sum(1 for item in files if item["untracked"])
+    return {
+        "ok": True, "available": True, "root": str(root), "branch": branch,
+        "detached": detached, "files": files, "staged_count": staged_count,
+        "unstaged_count": unstaged_count, "untracked_count": untracked_count,
+        "clean": not files, "recent_commits": commits,
+    }
+
+
+@app.route("/api/workspace/git/status")
+def api_workspace_git_status():
+    try:
+        return jsonify(_git_status_payload(_git_repo_root()))
+    except _GitError as exc:
+        return jsonify({"ok": False, "available": False, "error": str(exc)}), exc.status
+
+
+@app.route("/api/workspace/git/diff")
+def api_workspace_git_diff():
+    try:
+        root = _git_repo_root()
+        paths = _git_validate_paths([request.args.get("path", "")], root)
+        path = paths[0]
+        staged = request.args.get("staged") == "1"
+        untracked = _git_run(root, ["ls-files", "--others", "--exclude-standard", "--", path]).stdout.strip()
+        if untracked and not staged:
+            return jsonify({"ok": True, "path": path, "staged": False, "untracked": True,
+                            "diff": "", "truncated": False,
+                            "message": "Untracked file. Stage it to include it in Git; its contents are still available in Files."})
+        args = ["diff", "--no-ext-diff", "--no-color"]
+        if staged:
+            args.append("--cached")
+        args.extend(["--", path])
+        diff = _git_run(root, args).stdout
+        return jsonify({"ok": True, "path": path, "staged": staged, "untracked": False,
+                        "diff": diff[:_GIT_DIFF_LIMIT], "truncated": len(diff) > _GIT_DIFF_LIMIT})
+    except _GitError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), exc.status
+
+
+def _git_mutation(action: str):
+    root = _git_repo_root()
+    data = request.get_json(silent=True) or {}
+    if action == "commit":
+        message = str(data.get("message") or "").strip()
+        if not message:
+            raise _GitError("Write a commit message first.", 400)
+        if len(message) > 5000:
+            raise _GitError("The commit message is too long (5,000 characters maximum).", 400)
+        staged = _git_run(root, ["diff", "--cached", "--quiet"], check=False)
+        if staged.returncode == 0:
+            raise _GitError("Stage at least one change before committing.", 400)
+        if staged.returncode not in (0, 1):
+            raise _GitError((staged.stderr or "Could not inspect staged changes.").strip()[:1200], 400)
+        _git_run(root, ["commit", "-m", message], timeout=120)
+        payload = _git_status_payload(root)
+        payload["committed"] = payload["recent_commits"][0] if payload["recent_commits"] else None
+        return payload
+
+    if action == "stage" and data.get("all") is True:
+        _git_run(root, ["add", "-A", "--", "."])
+        return _git_status_payload(root)
+    paths = _git_validate_paths(data.get("paths"), root)
+    if action == "stage":
+        _git_run(root, ["add", "--", *paths])
+    elif action == "unstage":
+        has_head = _git_run(root, ["rev-parse", "--verify", "HEAD"], check=False).returncode == 0
+        if has_head:
+            _git_run(root, ["restore", "--staged", "--", *paths])
+        else:
+            _git_run(root, ["rm", "--cached", "-r", "--", *paths])
+    else:  # pragma: no cover - routes constrain the action
+        raise _GitError("Unknown Git action.", 400)
+    return _git_status_payload(root)
+
+
+@app.route("/api/workspace/git/stage", methods=["POST"])
+def api_workspace_git_stage():
+    try:
+        return jsonify(_git_mutation("stage"))
+    except _GitError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), exc.status
+
+
+@app.route("/api/workspace/git/unstage", methods=["POST"])
+def api_workspace_git_unstage():
+    try:
+        return jsonify(_git_mutation("unstage"))
+    except _GitError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), exc.status
+
+
+@app.route("/api/workspace/git/commit", methods=["POST"])
+def api_workspace_git_commit():
+    try:
+        return jsonify(_git_mutation("commit"))
+    except _GitError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), exc.status
 
 
 # ---------- Arena account connectors (official, live from arena.ai) ----------

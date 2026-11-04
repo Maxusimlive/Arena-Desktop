@@ -79,6 +79,7 @@
     message: '<path d="M20.5 12a8.3 8.3 0 0 1-12 7.2L4 20.5l1.4-4.2A8.3 8.3 0 1 1 20.5 12Z"/>',
     type: '<path d="M5 5h14M12 5v14M9.5 19h5"/>',
     play: '<circle cx="12" cy="12" r="8.7"/><path d="m10 8.5 5 3.5-5 3.5v-7Z"/>',
+    mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M8.5 21h7"/>',
     'arrow-down': '<path d="M12 5v14M6.5 13.5 12 19l5.5-5.5"/>',
     compress: '<path d="M9.5 3.5 4 9M4 4.8V9h4.2M14.5 3.5 20 9M20 4.8V9h-4.2M9.5 20.5 4 15M4 19.2V15h4.2M14.5 20.5 20 15M20 19.2V15h-4.2"/>'
   };
@@ -542,11 +543,14 @@
     getWorkspace() { return this.request('/api/workspace'); },
     setWorkspace(path) { return this.request('/api/workspace/set', { method: 'POST', body: { path } }); },
     clearWorkspace() { return this.request('/api/workspace/set', { method: 'POST', body: { clear: true } }); },
-    async uploadAttachment(file, kind, modality) {
+    async uploadAttachment(file, kind, modality, details = {}) {
       const form = new FormData();
       form.append('file', file, file.name);
       form.append('kind', kind || 'evaluation');
       if (modality) form.append('modality', modality);
+      if (details.source) form.append('source', String(details.source));
+      if (details.appMode) form.append('app_mode', String(details.appMode));
+      if (details.attempt) form.append('attempt', String(details.attempt));
       let response;
       try {
         response = await fetch('/api/uploads', {
@@ -564,6 +568,11 @@
     openWorkspace(path) { return this.request('/api/workspace/open', { method: 'POST', body: { path } }); },
     getWorkspaceTree(path = '.') { return this.request(`/api/workspace/tree?path=${encodeURIComponent(path)}`); },
     getWorkspaceFile(path) { return this.request(`/api/workspace/file?path=${encodeURIComponent(path)}`); },
+    getGitStatus() { return this.request('/api/workspace/git/status'); },
+    getGitDiff(path, staged = false) { return this.request(`/api/workspace/git/diff?path=${encodeURIComponent(path)}&staged=${staged ? '1' : '0'}`); },
+    gitStage(body) { return this.request('/api/workspace/git/stage', { method: 'POST', body }); },
+    gitUnstage(paths) { return this.request('/api/workspace/git/unstage', { method: 'POST', body: { paths } }); },
+    gitCommit(message) { return this.request('/api/workspace/git/commit', { method: 'POST', body: { message } }); },
     async downloadWorkspaceFile(path) {
       let response;
       try {
@@ -771,6 +780,14 @@
     connectors: [],
     pendingPermissions: [],
     mediaChoices: [],
+    gitFiles: [
+      { path: 'src/app.py', orig_path: null, index_status: 'M', worktree_status: ' ', staged: true, unstaged: false, untracked: false, conflict: false },
+      { path: 'README.md', orig_path: null, index_status: ' ', worktree_status: 'M', staged: false, unstaged: true, untracked: false, conflict: false },
+      { path: 'notes.txt', orig_path: null, index_status: '?', worktree_status: '?', staged: false, unstaged: false, untracked: true, conflict: false }
+    ],
+    gitCommits: [
+      { hash: 'demo1234567890', short_hash: 'demo123', subject: 'Demo starting point', relative_time: '2 hours ago' }
+    ],
     loginAt: 0,
     pendingAdd: false,
     activeChatId: null,
@@ -939,6 +956,31 @@
     'tests/test_normalize.py': "def test_demo() -> None:\n    assert True  # Demo file was not run\n"
   };
 
+  function demoGitPayload() {
+    const files = demoClone(demoStore.gitFiles || []);
+    return {
+      ok: true, available: true, root: demoStore.workspace, branch: 'main', detached: false,
+      files, staged_count: files.filter((item) => item.staged).length,
+      unstaged_count: files.filter((item) => item.unstaged).length,
+      untracked_count: files.filter((item) => item.untracked).length,
+      clean: !files.length, recent_commits: demoClone(demoStore.gitCommits || []), demo: true
+    };
+  }
+
+  function demoGitSetStaged(paths, staged, all = false) {
+    const wanted = new Set((paths || []).map(String));
+    demoStore.gitFiles = (demoStore.gitFiles || []).map((item) => {
+      if (!all && !wanted.has(String(item.path))) return item;
+      if (staged) {
+        return { ...item, index_status: item.untracked ? 'A' : (item.index_status === ' ' ? 'M' : item.index_status),
+          worktree_status: ' ', staged: true, unstaged: false, untracked: false };
+      }
+      return { ...item, index_status: ' ', worktree_status: item.index_status === 'A' ? '?' : 'M',
+        staged: false, unstaged: item.index_status !== 'A', untracked: item.index_status === 'A' };
+    });
+    return demoGitPayload();
+  }
+
   function demoClone(value) {
     return JSON.parse(JSON.stringify(value));
   }
@@ -1026,7 +1068,7 @@
         permission_mode: demoStore.permissionMode,
         workspace: demoStore.workspace,
         workspace_chosen: true,
-        app_version: '5.6.1',
+        app_version: '5.7.0',
         pending_permissions: demoStore.pendingPermissions.length,
         demo: true
       };
@@ -1149,13 +1191,17 @@
       demoStore.messages[chat.id] = demoClone(demoStore.cloudMessages[entry.eval_id] || []);
       return { ok: true, chat_id: chat.id, imported: true, demo: true };
     },
-    async uploadAttachment(file, kind) {
+    async uploadAttachment(file, kind, modality, details = {}) {
       await sleep(260);
       const mediaType = file?.type || 'application/octet-stream';
+      const image = mediaType.startsWith('image/')
+        ? { format: mediaType.split('/')[1]?.toUpperCase() || 'IMAGE', normalized: false }
+        : null;
+      const diagnostic = { diagnostic_id: 'demo-upload', stage: 'complete', image, demo: true };
       if (kind === 'agent') {
-        return { ok: true, kind: 'agent', filename: file?.name || 'file', mediaType, url: 'demo://agent-file', size: file?.size || 0, demo: true };
+        return { ok: true, kind: 'agent', filename: file?.name || 'file', mediaType, url: 'demo://agent-file', size: file?.size || 0, ...diagnostic };
       }
-      return { ok: true, kind: 'evaluation', name: file?.name || 'file', contentType: mediaType, url: 'demo://file', size: file?.size || 0, demo: true };
+      return { ok: true, kind: 'evaluation', name: file?.name || 'file', contentType: mediaType, mediaType, url: 'demo://file', size: file?.size || 0, ...diagnostic };
     },
     async downloadWorkspaceFile(path) {
       await sleep(60);
@@ -1296,7 +1342,27 @@
       demoStore.mediaChoices = (demoStore.mediaChoices || []).filter((choice) => String(choice.id) !== String(id));
       return { ok: true, selected_index: selected, selection_method: body.skip ? 'skip' : 'user', demo: true };
     },
-    async searchChats() { await sleep(40); return []; },
+    async searchChats(query) {
+      await sleep(40);
+      const needle = String(query || '').trim().toLowerCase();
+      if (needle.length < 2) return [];
+      const results = [];
+      Object.entries(demoStore.messages || {}).forEach(([chatId, messages]) => {
+        const title = demoStore.chats.find((chat) => String(chat.id) === String(chatId))?.title || 'Chat';
+        (messages || []).forEach((message, index) => {
+          const text = String(message.content || message.text || '');
+          const position = text.toLowerCase().indexOf(needle);
+          if (position < 0) return;
+          const start = Math.max(0, position - 45);
+          const end = Math.min(text.length, position + needle.length + 60);
+          results.push({
+            chat_id: chatId, title, msg_index: index, role: message.role || 'assistant',
+            snippet: `${start ? '…' : ''}${text.slice(start, end).replace(/\s+/g, ' ')}${end < text.length ? '…' : ''}`
+          });
+        });
+      });
+      return results.slice(0, 40);
+    },
     async forkChat() { await sleep(40); return { ok: true, chat_id: null, demo: true }; },
     async restoreCheckpoint() { await sleep(40); return { ok: true, restored: 0, removed: 0, demo: true }; },
     async workspaceSnapshot() { await sleep(40); return { ok: true, text: '[Attached workspace files]\n\n--- demo.txt ---\nDemo file content.\n\n[/Attached workspace files]', chars: 90, files: 1, demo: true }; },
@@ -1343,6 +1409,26 @@
       const key = String(path || '');
       if (!(key in demoWorkspaceFileData)) throw new ApiError("Demo file not found or unavailable for preview.", 404);
       return { path: key, name: key.split('/').pop(), size: demoWorkspaceFileData[key].length, content: demoWorkspaceFileData[key], demo: true };
+    },
+    async getGitStatus() { await sleep(60); return demoGitPayload(); },
+    async getGitDiff(path, staged = false) {
+      await sleep(60);
+      const item = (demoStore.gitFiles || []).find((file) => file.path === path);
+      if (item?.untracked && !staged) return { ok: true, path, staged: false, untracked: true, diff: '', truncated: false, message: 'Untracked demo file.', demo: true };
+      return { ok: true, path, staged, untracked: false, truncated: false, demo: true,
+        diff: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-Old demo line\n+New demo line\n` };
+    },
+    async gitStage(body = {}) { await sleep(80); return demoGitSetStaged(body.paths, true, body.all === true); },
+    async gitUnstage(paths) { await sleep(80); return demoGitSetStaged(paths, false); },
+    async gitCommit(message) {
+      await sleep(100);
+      const staged = (demoStore.gitFiles || []).filter((item) => item.staged);
+      if (!String(message || '').trim()) throw new ApiError('Write a commit message first.', 400);
+      if (!staged.length) throw new ApiError('Stage at least one change before committing.', 400);
+      demoStore.gitFiles = (demoStore.gitFiles || []).filter((item) => !item.staged);
+      const commit = { hash: `demo${Date.now()}`, short_hash: `d${String(Date.now()).slice(-6)}`, subject: String(message).trim(), relative_time: 'just now' };
+      demoStore.gitCommits = [commit, ...(demoStore.gitCommits || [])].slice(0, 5);
+      return { ...demoGitPayload(), committed: commit };
     },
     async getConnectors() { await sleep(110); return demoConnectorsPayload(); },
     async reloadConnectors() { await sleep(110); return demoConnectorsPayload(); },
@@ -1756,12 +1842,22 @@ You can start with a more structured option: one script, short captions, and a c
     directTools: (() => { try { return window.localStorage.getItem('ap-direct-tools') !== '0'; } catch { return true; } })(),
     rateLimitUntil: 0,
     historyChars: 0,
+    usageToday: null,
+    usageLoadedAt: 0,
+    usageLoading: false,
     memoryData: null,
     updateInfo: null,
     appSettings: null,
     pendingQuestions: [],
     pendingMediaChoices: [],
     answeringMediaChoices: new Set(),
+    openDetails: new Set(),
+    preservedScroll: new Map(),
+    preservedInputs: new Map(),
+    preservedMedia: new Map(),
+    voiceListening: new Map(),
+    _renderDeferred: false,
+    _renderRetryTimer: null,
     activeChatEvalId: null,
     activeChatSource: 'local',
     refreshingChatId: null,
@@ -1799,6 +1895,15 @@ You can start with a more structured option: one script, short captions, and a c
     workspaceLoadingPaths: new Set(),
     workspaceExpanded: new Set(),
     workspaceRequest: 0,
+    workspaceTab: 'files',
+    gitStatus: null,
+    gitLoading: false,
+    gitError: null,
+    gitBusy: false,
+    gitSelected: new Set(),
+    gitCommitMessage: '',
+    gitDiff: null,
+    gitRequest: 0,
     connectors: null,
     connectorsLoading: false,
     connectorsError: null,
@@ -2017,6 +2122,32 @@ You can start with a more structured option: one script, short captions, and a c
     };
   }
 
+  function modelInputSupport(raw) {
+    const direct = (field) => (typeof raw?.[field] === 'boolean' ? raw[field] : null);
+    const inputCaps = raw?.capabilities?.inputCapabilities;
+    const presence = (field, keys) => {
+      const known = direct(field);
+      if (known !== null) return known;
+      if (inputCaps && typeof inputCaps === 'object' && !Array.isArray(inputCaps)) {
+        const present = keys.filter((key) => Object.prototype.hasOwnProperty.call(inputCaps, key));
+        if (!present.length) return false;
+        return present.some((key) => {
+          const value = inputCaps[key];
+          return value !== null && value !== undefined && value !== false && value !== 0 && value !== '';
+        });
+      }
+      if (Array.isArray(raw?.capabilities)) {
+        const names = new Set(raw.capabilities.map((item) => String(item).trim().toLowerCase()).filter(Boolean));
+        if (names.size) return keys.some((key) => names.has(key));
+      }
+      return null;
+    };
+    return {
+      image: presence('supports_image_input', ['image', 'images', 'vision', 'image_input']),
+      file: presence('supports_file_input', ['file', 'files', 'pdf', 'document', 'documents', 'file_input'])
+    };
+  }
+
   function normalizeModel(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const id = raw.id ?? raw.model_id ?? raw.slug ?? raw.model;
@@ -2026,6 +2157,7 @@ You can start with a more structured option: one script, short captions, and a c
     let capabilities = raw.capabilities ?? raw.tags ?? [];
     if (typeof capabilities === 'string') capabilities = capabilities.split(/[,;]/).map((item) => item.trim()).filter(Boolean);
     if (!Array.isArray(capabilities)) capabilities = [];
+    const inputSupport = modelInputSupport(raw);
     return {
       id: String(id),
       name: String(raw.name ?? raw.display_name ?? raw.label ?? id),
@@ -2033,6 +2165,8 @@ You can start with a more structured option: one script, short captions, and a c
       org_display: org,
       color: safeColor(raw.color),
       capabilities,
+      supports_image_input: inputSupport.image,
+      supports_file_input: inputSupport.file,
       provider: String(raw.provider ?? ''),
       user_selectable: raw.user_selectable !== false,
       is_router: Boolean(raw.is_router),
@@ -2384,18 +2518,33 @@ You can start with a more structured option: one script, short captions, and a c
     const selectedIndex = selectedRaw === null || selectedRaw === undefined || selectedRaw === ''
       ? null : (Number.isFinite(Number(selectedRaw)) ? Number(selectedRaw) : null);
     const status = textValue(raw.status || (selectedIndex !== null ? 'completed' : 'awaiting_user_response'));
+    const kind = raw.kind === 'voice' || raw.tool === 'add_voice' ? 'voice' : 'image';
+    const numeric = (value) => (Array.isArray(value)
+      ? value.slice(0, 16).map((item) => Math.max(0, Number(item) || 0)) : []);
+    const identityRaw = raw.voice_identity ?? raw.voiceIdentity ?? {};
+    const voiceIdentity = identityRaw && typeof identityRaw === 'object' ? {
+      gender: ['feminine', 'masculine'].includes(identityRaw.gender) ? identityRaw.gender : '',
+      useCase: textValue(identityRaw.use_case ?? identityRaw.useCase ?? ''),
+      index: Number.isFinite(Number(identityRaw.index)) ? Number(identityRaw.index) : null
+    } : { gender: '', useCase: '', index: null };
     return {
       id: raw.id ? String(raw.id) : null,
       toolCallId: textValue(raw.tool_call_id ?? raw.toolCallId ?? ''),
       chatId: raw.chat_id ?? raw.chatId ?? null,
-      kind: 'image',
+      kind,
       status,
       prompt: textValue(raw.prompt || ''),
       filePath: textValue(raw.file_path ?? raw.filePath ?? ''),
+      text: textValue(raw.text || ''),
+      language: textValue(raw.language || ''),
+      voiceIdentity,
+      voiceId: textValue(raw.voice_id ?? raw.voiceId ?? ''),
+      playCounts: numeric(raw.play_counts ?? raw.playCounts).map((item) => Math.trunc(item)),
+      listenSeconds: numeric(raw.listen_seconds ?? raw.listenSeconds),
       candidates,
       selectedIndex,
       selectionMethod: textValue(raw.selection_method ?? raw.selectionMethod ?? ''),
-      attribution: [...attributionByIndex.values()]
+      attribution: kind === 'image' ? [...attributionByIndex.values()] : []
     };
   }
 
@@ -2447,6 +2596,14 @@ You can start with a more structured option: one script, short captions, and a c
         is_private: Boolean(candidate.is_private || reveal.is_private)
       };
     });
+    ['prompt', 'filePath', 'text', 'language', 'voiceId'].forEach((key) => {
+      if (!incoming[key]) merged[key] = existing[key];
+    });
+    if (!incoming.playCounts?.length) merged.playCounts = existing.playCounts;
+    if (!incoming.listenSeconds?.length) merged.listenSeconds = existing.listenSeconds;
+    if (!incoming.voiceIdentity?.gender && !incoming.voiceIdentity?.useCase && incoming.voiceIdentity?.index === null) {
+      merged.voiceIdentity = existing.voiceIdentity;
+    }
     return merged;
   }
 
@@ -2468,8 +2625,8 @@ You can start with a more structured option: one script, short captions, and a c
     if (event?.media_choice?.candidates?.length) return upsertLaneMediaChoice(lane, event.media_choice);
     if (!Array.isArray(lane.mediaChoices) || !lane.mediaChoices.length) return null;
     const toolCallId = textValue(event?.tool_call_id ?? event?.toolCallId ?? '');
-    const choice = lane.mediaChoices.find((item) => toolCallId && item.toolCallId === toolCallId)
-      || lane.mediaChoices[lane.mediaChoices.length - 1];
+    const choice = lane.mediaChoices.find((item) => toolCallId && item.toolCallId === toolCallId && item.kind !== 'voice')
+      || [...lane.mediaChoices].reverse().find((item) => item.kind !== 'voice');
     if (!choice) return null;
     const normalized = normalizeMediaChoice({
       ...choice,
@@ -2588,6 +2745,100 @@ You can start with a more structured option: one script, short captions, and a c
         updateComposerState();
       }
     } catch { /* malformed URL: ignore */ }
+  }
+
+  let pendingDeepLink = null;
+
+  function normalizeDeepLink(value) {
+    try {
+      let action = '';
+      let params = null;
+      if (typeof value === 'string') {
+        const url = new URL(value);
+        if (url.protocol !== 'arenadesktop:') return null;
+        action = String(url.hostname || url.pathname.replace(/^\/+/, '').split('/')[0] || '').toLowerCase();
+        params = url.searchParams;
+        if (action === 'chat' && !params.get('id')) {
+          const pathId = url.pathname.replace(/^\/+/, '');
+          if (pathId) params.set('id', pathId);
+        }
+      } else if (value && typeof value === 'object') {
+        action = String(value.action || '').toLowerCase();
+        params = new URLSearchParams();
+        for (const [key, item] of Object.entries(value)) {
+          if (key !== 'action' && item != null) params.set(key, String(item));
+        }
+      } else return null;
+      if (action === 'open' || action === 'new') return { action };
+      if (action === 'ask') {
+        const text = String(params.get('q') || params.get('text') || params.get('prompt') || '').trim();
+        return text && text.length <= 10000 ? { action, text } : null;
+      }
+      if (action === 'chat') {
+        const chat_id = String(params.get('id') || params.get('chat_id') || params.get('chatId') || '');
+        if (!isUuidText(chat_id)) return null;
+        const result = { action, chat_id };
+        const rawIndex = params.get('msg_index') ?? params.get('msg') ?? params.get('message');
+        if (rawIndex != null && rawIndex !== '') {
+          const msg_index = Number(rawIndex);
+          if (!Number.isInteger(msg_index) || msg_index < 0 || msg_index > 1000000) return null;
+          result.msg_index = msg_index;
+        }
+        return result;
+      }
+    } catch { /* invalid external link: ignore it */ }
+    return null;
+  }
+
+  async function applyDeepLink(link) {
+    if (!link) return false;
+    if (!state.booted) { pendingDeepLink = link; return true; }
+    if (link.action === 'open') {
+      focusComposer();
+      return true;
+    }
+    if (link.action === 'new') {
+      await createNewChat();
+      return true;
+    }
+    if (link.action === 'ask') {
+      const id = await createNewChat({ focus: false });
+      if (!id || !els.prompt) return false;
+      els.prompt.value = link.text;
+      state.draft = link.text;
+      saveDraft();
+      resizePrompt();
+      updateComposerState();
+      focusComposer();
+      toast('Prompt inserted from a link. Review it, then press Send.', 'info', 'Arena Desktop link');
+      return true;
+    }
+    if (link.action === 'chat') {
+      if (Number.isInteger(link.msg_index)) await openChatAtMessage(link.chat_id, link.msg_index);
+      else await openChat(link.chat_id);
+      return true;
+    }
+    return false;
+  }
+
+  window.__arenaDeepLink = (value) => {
+    const link = normalizeDeepLink(value);
+    if (!link) return false;
+    void applyDeepLink(link);
+    return true;
+  };
+
+  function applyInitialDeepLink() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const raw = params.get('deeplink');
+      if (!raw) return;
+      params.delete('deeplink');
+      const clean = window.location.pathname + (params.toString() ? `?${params}` : '') + window.location.hash;
+      window.history.replaceState(null, '', clean);
+      const link = normalizeDeepLink(raw);
+      if (link) void applyDeepLink(link);
+    } catch { /* malformed launch URL: normal startup continues */ }
   }
 
   function checkForUpdatesOnce() {
@@ -3265,6 +3516,10 @@ You can start with a more structured option: one script, short captions, and a c
         iconEl('download'), el('span', { text: 'Export .md' }));
       exp.addEventListener('click', () => exportChatMd());
       els.chatMeta.appendChild(exp);
+      const expHtml = el('button', { class: 'meta-chip meta-chip-btn', type: 'button', title: 'Download this chat as a standalone styled HTML file' },
+        iconEl('download'), el('span', { text: 'Export HTML' }));
+      expHtml.addEventListener('click', () => exportChatMd('html'));
+      els.chatMeta.appendChild(expHtml);
     }
   }
 
@@ -3549,6 +3804,110 @@ You can start with a more structured option: one script, short captions, and a c
     );
   }
 
+  function preservedDetails(key, className, ...children) {
+    const node = el('details', {
+      class: className,
+      'data-preserve-key': key,
+      open: Boolean(key && state.openDetails.has(key))
+    }, ...children);
+    if (key) {
+      node.addEventListener('toggle', () => {
+        if (node.open) state.openDetails.add(key);
+        else state.openDetails.delete(key);
+      });
+    }
+    return node;
+  }
+
+  function captureMessageUiState() {
+    if (!els.messageList) return { focusKey: null };
+    els.messageList.querySelectorAll('details[data-preserve-key]').forEach((node) => {
+      const key = node.getAttribute('data-preserve-key');
+      if (!key) return;
+      if (node.open) state.openDetails.add(key);
+      else state.openDetails.delete(key);
+    });
+    els.messageList.querySelectorAll('[data-scroll-key]').forEach((node) => {
+      const key = node.getAttribute('data-scroll-key');
+      if (key && (node.scrollTop || node.scrollLeft)) {
+        state.preservedScroll.set(key, { top: node.scrollTop, left: node.scrollLeft });
+      }
+    });
+    let focusKey = null;
+    els.messageList.querySelectorAll('input[data-preserve-key], textarea[data-preserve-key]').forEach((node) => {
+      const key = node.getAttribute('data-preserve-key');
+      if (!key) return;
+      state.preservedInputs.set(key, {
+        value: node.value || '',
+        selectionStart: typeof node.selectionStart === 'number' ? node.selectionStart : null,
+        selectionEnd: typeof node.selectionEnd === 'number' ? node.selectionEnd : null
+      });
+      if (document.activeElement === node) focusKey = key;
+    });
+    els.messageList.querySelectorAll('audio[data-preserve-key], video[data-preserve-key]').forEach((node) => {
+      const key = node.getAttribute('data-preserve-key');
+      if (!key) return;
+      state.preservedMedia.set(key, {
+        currentTime: Number(node.currentTime) || 0,
+        playing: !node.paused && !node.ended,
+        playbackRate: Number(node.playbackRate) || 1,
+        volume: Number(node.volume)
+      });
+    });
+    return { focusKey };
+  }
+
+  function restoreMessageUiState(snapshot = {}) {
+    if (!els.messageList) return;
+    els.messageList.querySelectorAll('details[data-preserve-key]').forEach((node) => {
+      const key = node.getAttribute('data-preserve-key');
+      if (key) node.open = state.openDetails.has(key);
+    });
+    els.messageList.querySelectorAll('[data-scroll-key]').forEach((node) => {
+      const saved = state.preservedScroll.get(node.getAttribute('data-scroll-key'));
+      if (!saved) return;
+      node.scrollTop = saved.top || 0;
+      node.scrollLeft = saved.left || 0;
+    });
+    els.messageList.querySelectorAll('input[data-preserve-key], textarea[data-preserve-key]').forEach((node) => {
+      const key = node.getAttribute('data-preserve-key');
+      const saved = state.preservedInputs.get(key);
+      if (!saved) return;
+      if (node.value !== saved.value) node.value = saved.value;
+      if (snapshot.focusKey === key) {
+        try { node.focus({ preventScroll: true }); } catch { node.focus(); }
+        if (saved.selectionStart !== null && typeof node.setSelectionRange === 'function') {
+          try { node.setSelectionRange(saved.selectionStart, saved.selectionEnd ?? saved.selectionStart); } catch { /* input type may not support it */ }
+        }
+      }
+    });
+    els.messageList.querySelectorAll('audio[data-preserve-key], video[data-preserve-key]').forEach((node) => {
+      const saved = state.preservedMedia.get(node.getAttribute('data-preserve-key'));
+      if (!saved) return;
+      node.playbackRate = saved.playbackRate || 1;
+      if (Number.isFinite(saved.volume)) node.volume = Math.min(1, Math.max(0, saved.volume));
+      const restoreTime = () => {
+        if (saved.currentTime > 0 && Math.abs((node.currentTime || 0) - saved.currentTime) > 0.25) {
+          try { node.currentTime = saved.currentTime; } catch { /* metadata not ready */ }
+        }
+        if (saved.playing) node.play().catch(() => undefined);
+      };
+      if (node.readyState >= 1) restoreTime();
+      else node.addEventListener('loadedmetadata', restoreTime, { once: true });
+    });
+  }
+
+  function chatRenderBlocked() {
+    if (!els.messageList) return false;
+    const active = document.activeElement;
+    if (active && els.messageList.contains(active)
+      && (active.matches('input, textarea, [contenteditable="true"]'))) return true;
+    const selection = window.getSelection?.();
+    if (selection && !selection.isCollapsed && selection.anchorNode
+      && els.messageList.contains(selection.anchorNode)) return true;
+    return [...els.messageList.querySelectorAll('audio, video')].some((node) => !node.paused && !node.ended);
+  }
+
   function renderSources(lane) {
     if (!Array.isArray(lane.sources) || !lane.sources.length) return null;
     const sourceNodes = lane.sources.map((source, index) => {
@@ -3571,9 +3930,9 @@ You can start with a more structured option: one script, short captions, and a c
     );
   }
 
-  function renderMedia(lane) {
+  function renderMedia(lane, baseKey = '') {
     if (!Array.isArray(lane.media) || !lane.media.length) return null;
-    const cards = lane.media.map((media) => {
+    const cards = lane.media.map((media, mediaIndex) => {
       const caption = el('div', { class: 'media-caption' },
         el('span', { class: 'media-title', title: media.title, text: media.title }),
         el('button', {
@@ -3584,11 +3943,14 @@ You can start with a more structured option: one script, short captions, and a c
       let frame;
       if (media.kind === 'audio' && media.url) {
         frame = el('div', { class: 'media-frame is-audio' },
-          el('audio', { controls: true, preload: 'metadata', src: media.url, 'aria-label': media.alt }));
+          el('audio', {
+            controls: true, preload: 'metadata', src: media.url, 'aria-label': media.alt,
+            'data-preserve-key': `${baseKey}:media:${mediaIndex}:${media.url}`
+          }));
       } else if (media.kind === 'video' && media.url) {
         const video = el('video', {
           controls: true, preload: 'metadata', poster: media.poster || false,
-          'aria-label': media.alt
+          'aria-label': media.alt, 'data-preserve-key': `${baseKey}:media:${mediaIndex}:${media.url}`
         }, el('source', { src: media.url }));
         frame = el('div', { class: 'media-frame' }, video);
       } else if (media.kind === 'video') {
@@ -3611,9 +3973,9 @@ You can start with a more structured option: one script, short captions, and a c
     return { label: status || "In progress", cls: '' };
   }
 
-  function renderActivities(lane) {
+  function renderActivities(lane, baseKey = '') {
     if (!Array.isArray(lane.activities) || !lane.activities.length) return null;
-    const cards = lane.activities.map((activity) => {
+    const cards = lane.activities.map((activity, activityIndex) => {
       const status = activityStatus(activity.status);
       const detail = activity.command || activity.path || activity.detail;
       const childId = activity.raw?.child_id;
@@ -3627,14 +3989,15 @@ You can start with a more structured option: one script, short captions, and a c
       const card = el('div', { class: `activity-card${status.cls === 'is-err' ? ' is-danger' : ''}` }, head);
       if (detail) {
         const isLong = detail.length > 180 || String(activity.status).toLowerCase() === 'running';
+        const activityKey = `${baseKey}:activity:${activity.id || activityIndex}:${activity.name || 'action'}`;
         if (isLong) {
-          const details = el('details', { class: 'activity-detail' },
+          const details = preservedDetails(activityKey, 'activity-detail',
             el('summary', { text: "Show details" }),
-            el('div', { class: 'activity-body' }, el('pre', { text: detail }))
+            el('div', { class: 'activity-body' }, el('pre', { text: detail, 'data-scroll-key': `${activityKey}:pre` }))
           );
           card.appendChild(details);
         } else {
-          card.appendChild(el('div', { class: 'activity-body' }, el('pre', { text: detail })));
+          card.appendChild(el('div', { class: 'activity-body' }, el('pre', { text: detail, 'data-scroll-key': `${activityKey}:pre` })));
         }
       }
       if (activity.url) {
@@ -3780,11 +4143,27 @@ You can start with a more structured option: one script, short captions, and a c
     return el('div', { class: 'answer-footnote' }, el('span', { class: 'status-dot is-online' }), el('span', { text: bits.join(' · ') }));
   }
 
-  function renderAssistantLane(lane, turn, key, totalLanes) {
+  function renderAssistantLane(lane, turn, key, totalLanes, uiKey = '') {
     const card = el('article', {
       class: `message-assistant assistant-lane${lane.streaming ? ' is-streaming' : ''}`,
       'aria-label': `${lane.modelName || (key === 'b' ? "Model B" : "Model A")}, response`
     });
+    const baseKey = `${uiKey || `turn:${turn.msgEnd ?? 'live'}`}:${key}`;
+    const visibleText = visibleLaneText(lane);
+    const hasWorkTimeline = Boolean(
+      (Array.isArray(lane.activities) && lane.activities.length)
+      || (Array.isArray(lane.agentStages) && lane.agentStages.length)
+      || (Array.isArray(lane.mediaChoices) && lane.mediaChoices.length)
+      || (Array.isArray(lane.artifacts) && lane.artifacts.length)
+      || (Array.isArray(lane.permissions) && lane.permissions.length)
+    );
+    // Position is decided from the turn's nature, not only from blocks that
+    // have arrived so far.  Otherwise the first Agent/tool text renders at
+    // the top and then visibly jumps below the timeline on the next event.
+    // The Summary styling/jump still require an actual timeline.
+    const turnMode = validMode(turn.mode) || state.mode;
+    const expectedWorkTimeline = turnMode === 'agent' || Boolean(turn.toolsEnabled);
+    const deferTextToEnd = hasWorkTimeline || expectedWorkTimeline;
     const avatarColor = safeColor(lane.modelColor) || '#bdd3c1';
     const laneLogo = modelIconNode({
       name: lane.modelName, org: lane.modelOrg, color: lane.modelColor,
@@ -3819,23 +4198,38 @@ You can start with a more structured option: one script, short captions, and a c
       }, iconEl('copy')) : null
     );
     card.appendChild(head);
+    if (hasWorkTimeline && visibleText.trim().length > 900 && !lane.streaming) {
+      const jump = el('button', {
+        class: 'summary-jump', type: 'button', title: 'Jump to the final summary at the end of this response'
+      }, el('span', { text: 'Summary' }), el('span', { 'aria-hidden': 'true', text: '↓' }));
+      jump.addEventListener('click', () => {
+        card.querySelector('[data-lane-summary]')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      });
+      head.appendChild(jump);
+    }
 
     if (lane.reasoning) {
-      const details = el('details', { class: 'reasoning' },
+      const details = preservedDetails(`${baseKey}:reasoning`, 'reasoning',
         el('summary', { text: lane.demo ? "Reflections · demo" : "Reflections" }),
-        el('div', { class: 'reasoning-content', text: lane.reasoning })
+        el('div', { class: 'reasoning-content', text: lane.reasoning, 'data-scroll-key': `${baseKey}:reasoning-content` })
       );
       card.appendChild(details);
     }
 
-    const markdown = el('div', { class: 'markdown' });
-    const visibleText = visibleLaneText(lane);
+    const markdown = el('div', {
+      class: `markdown${hasWorkTimeline ? ' markdown-summary' : ''}`,
+      ...(hasWorkTimeline ? { 'data-lane-summary': baseKey } : {})
+    });
     if (visibleText) markdown.appendChild(renderMarkdown(visibleText));
     if (lane.streaming && !visibleText) {
       markdown.appendChild(el('span', { class: 'loading-block' }, el('span', { class: 'loading-spinner' }), el('span', { text: "Waiting for response text…" })));
     }
     if (lane.streaming && visibleText) markdown.appendChild(el('span', { class: 'stream-cursor', 'aria-hidden': 'true' }));
-    card.appendChild(markdown);
+    // Ordinary answers keep their text directly under Reflections.  Agent /
+    // tool turns are read as work first and report last: their accumulated
+    // answer text is the turn summary, so it is appended after the timeline
+    // below from the first token, before any timeline block exists.
+    if (!deferTextToEnd) card.appendChild(markdown);
 
     if (turn.round && turn.round > 1) {
       card.appendChild(el('div', { class: 'agent-steps' }, el('span', { class: 'agent-step' }, el('span', { class: 'status-dot is-online' }), el('span', { text: `Round ${turn.round}` }))));
@@ -3845,11 +4239,11 @@ You can start with a more structured option: one script, short captions, and a c
     }
     const sources = renderSources(lane);
     if (sources) card.appendChild(sources);
-    const media = renderMedia(lane);
+    const media = renderMedia(lane, baseKey);
     if (media) card.appendChild(media);
     const mediaChoices = renderMediaChoices(lane);
     if (mediaChoices) card.appendChild(mediaChoices);
-    const activities = renderActivities(lane);
+    const activities = renderActivities(lane, baseKey);
     if (activities) card.appendChild(activities);
     const artifacts = renderArtifactsInline(lane);
     if (artifacts) card.appendChild(artifacts);
@@ -3857,6 +4251,7 @@ You can start with a more structured option: one script, short captions, and a c
     if (Array.isArray(lane.permissions)) {
       lane.permissions.forEach((permission) => card.appendChild(renderPermissionCard(permission)));
     }
+    if (deferTextToEnd) card.appendChild(markdown);
 
     if (Array.isArray(lane.notices)) {
       lane.notices.forEach((notice) => card.appendChild(el('div', { class: 'message-notice' }, iconEl('info'), el('span', { text: notice }))));
@@ -3937,15 +4332,16 @@ You can start with a more structured option: one script, short captions, and a c
     }
   }
 
-  function renderTurn(turn, pairIndex = -1) {
+  function renderTurn(turn, pairIndex = -1, uiKey = '') {
     const wrapper = el('section', { class: 'message-turn', 'aria-label': "Dialogue turn" });
     if (turn.msgEnd != null) wrapper.setAttribute('data-msg-end', String(turn.msgEnd));
+    if (uiKey) wrapper.setAttribute('data-ui-key', uiKey);
     if (turn.user) wrapper.appendChild(userMessageNode(turn.user));
     const lanes = turn.lanes || {};
     const order = Object.keys(lanes).filter((key) => lanes[key]);
     if (order.length) {
       const grid = el('div', { class: `lane-grid ${order.length > 1 ? 'lanes-2' : 'lanes-1'}` });
-      order.forEach((key) => grid.appendChild(renderAssistantLane(lanes[key], turn, key, order.length)));
+      order.forEach((key) => grid.appendChild(renderAssistantLane(lanes[key], turn, key, order.length, uiKey)));
       wrapper.appendChild(grid);
       const voteBar = renderVoteBar(turn, pairIndex);
       if (voteBar) wrapper.appendChild(voteBar);
@@ -4013,7 +4409,19 @@ You can start with a more structured option: one script, short captions, and a c
       body.appendChild(row);
     }
     if (q.custom) {
-      const input = el('input', { class: 'input', type: 'text', placeholder: isPlan ? 'Describe changes to the plan\u2026' : 'Your answer\u2026', 'aria-label': 'Your answer' });
+      const inputKey = `question:${q.id}`;
+      const input = el('input', {
+        class: 'input', type: 'text', placeholder: isPlan ? 'Describe changes to the plan\u2026' : 'Your answer\u2026',
+        'aria-label': 'Your answer', 'data-preserve-key': inputKey, value: q.draft || state.preservedInputs.get(inputKey)?.value || ''
+      });
+      input.addEventListener('input', () => {
+        q.draft = input.value;
+        state.preservedInputs.set(inputKey, {
+          value: input.value,
+          selectionStart: input.selectionStart,
+          selectionEnd: input.selectionEnd
+        });
+      });
       const send = el('button', { class: 'button button-small', type: 'button' }, iconEl('check'), el('span', { text: isPlan ? 'Revise' : 'Answer' }));
       send.addEventListener('click', () => { void answerQuestionUI(q, input.value, card); });
       input.addEventListener('keydown', (e) => {
@@ -4045,14 +4453,44 @@ You can start with a more structured option: one script, short captions, and a c
     } catch { /* live choices still arrive over the stream */ }
   }
 
+  function voiceStatsRecord(choice) {
+    const key = String(choice?.id || choice?.toolCallId || 'voice');
+    if (!state.voiceListening.has(key)) {
+      state.voiceListening.set(key, { playCounts: {}, listenSeconds: {}, startedAt: {} });
+    }
+    return state.voiceListening.get(key);
+  }
+
+  function flushVoiceListening(choice, onlyIndex = null) {
+    const record = voiceStatsRecord(choice);
+    const now = performance.now();
+    Object.entries(record.startedAt).forEach(([index, started]) => {
+      if (onlyIndex !== null && Number(index) !== Number(onlyIndex)) return;
+      if (!Number.isFinite(Number(started))) return;
+      record.listenSeconds[index] = (Number(record.listenSeconds[index]) || 0) + Math.max(0, (now - Number(started)) / 1000);
+      delete record.startedAt[index];
+    });
+    return record;
+  }
+
+  function voiceListeningPayload(choice) {
+    const record = flushVoiceListening(choice);
+    return {
+      play_counts: (choice.candidates || []).map((candidate) => Math.trunc(Number(record.playCounts[candidate.index]) || 0)),
+      listen_seconds: (choice.candidates || []).map((candidate) => Math.round((Number(record.listenSeconds[candidate.index]) || 0) * 1000) / 1000)
+    };
+  }
+
   async function answerMediaChoiceUI(choice, body, card) {
     if (!choice?.id) return;
     const id = String(choice.id);
     if (state.answeringMediaChoices.has(id)) return;
     state.answeringMediaChoices.add(id);
     card?.querySelectorAll('button').forEach((node) => { node.disabled = true; });
+    const isVoice = choice.kind === 'voice';
+    const requestBody = isVoice ? { ...body, ...voiceListeningPayload(choice) } : body;
     try {
-      const result = await API.answerMediaChoice(id, body);
+      const result = await API.answerMediaChoice(id, requestBody);
       const selected = Number.isFinite(Number(result?.selected_index))
         ? Number(result.selected_index)
         : (body.skip ? Number(choice.candidates[0]?.index || 0) : Number(body.selected_index));
@@ -4062,6 +4500,11 @@ You can start with a more structured option: one script, short captions, and a c
         target.selectedIndex = selected;
         target.selectionMethod = method;
         target.status = state.demo ? 'completed' : 'submitting';
+        if (isVoice) {
+          target.playCounts = Array.isArray(result?.play_counts) ? result.play_counts : requestBody.play_counts;
+          target.listenSeconds = Array.isArray(result?.listen_seconds) ? result.listen_seconds : requestBody.listen_seconds;
+          if (result?.voice_id) target.voiceId = String(result.voice_id);
+        }
       };
       apply(choice);
       Object.values(state.chatTurns || {}).forEach((turns) => {
@@ -4082,7 +4525,7 @@ You can start with a more structured option: one script, short captions, and a c
       updatePendingPermissionsBadge();
       renderMessages();
     } catch (error) {
-      toast(errorMessage(error), 'error', 'Image choice');
+      toast(errorMessage(error), 'error', isVoice ? 'Voice choice' : 'Image choice');
     } finally {
       state.answeringMediaChoices.delete(id);
       if (state.view === 'chat') renderMessages();
@@ -4095,33 +4538,63 @@ You can start with a more structured option: one script, short captions, and a c
     const cancelled = choice.status === 'cancelled';
     const failed = choice.status === 'error';
     const completed = !pending && !cancelled && !failed && choice.selectedIndex !== null;
+    const isVoice = choice.kind === 'voice';
+    const noun = isVoice ? 'voice' : 'image';
     const card = el('section', {
-      class: `permission-card media-choice-card${completed ? ' is-done' : ''}`,
+      class: `permission-card media-choice-card${isVoice ? ' is-voice' : ''}${completed ? ' is-done' : ''}`,
       'data-media-choice-card': choice.id || choice.toolCallId || ''
     });
-    const title = pending ? 'Choose an image'
+    const title = pending ? `Choose a ${noun}`
       : submitting ? 'Sending your choice…'
-        : cancelled ? 'Image choice cancelled'
-          : failed ? 'Image choice failed' : 'Image chosen';
-    const subtitle = pending ? 'Arena Agent is paused until you pick one'
-      : submitting ? 'Arena Agent will continue with the selected image'
-        : completed ? 'Both options stay in the transcript, with their models revealed'
+        : cancelled ? `${isVoice ? 'Voice' : 'Image'} choice cancelled`
+          : failed ? `${isVoice ? 'Voice' : 'Image'} choice failed` : `${isVoice ? 'Voice' : 'Image'} chosen`;
+    const subtitle = pending ? (isVoice ? 'Listen to each audition, then pick the voice to use' : 'Arena Agent is paused until you pick one')
+      : submitting ? `Arena Agent will continue with the selected ${noun}`
+        : completed ? (isVoice ? 'The selected voice stays in the transcript' : 'Both options stay in the transcript, with their models revealed')
           : 'This choice is no longer waiting';
     card.appendChild(el('div', { class: 'permission-head' },
-      el('span', { class: 'permission-icon' }, iconEl('image')),
+      el('span', { class: 'permission-icon' }, iconEl(isVoice ? 'mic' : 'image')),
       el('div', { class: 'permission-heading' },
         el('p', { class: 'permission-title', text: title }),
         el('p', { class: 'permission-subtitle', text: subtitle }))));
 
     const body = el('div', { class: 'permission-body media-choice-body' });
-    if (choice.prompt) body.appendChild(el('p', { class: 'media-choice-prompt', text: choice.prompt }));
-    if (choice.filePath) body.appendChild(el('p', { class: 'media-choice-file', text: choice.filePath }));
+    if (isVoice) {
+      if (choice.text) body.appendChild(el('blockquote', { class: 'media-choice-prompt voice-choice-text', text: choice.text }));
+      const details = [choice.language ? `Language: ${choice.language}` : '',
+        choice.voiceIdentity?.gender || '', choice.voiceIdentity?.useCase || '',
+        choice.voiceId ? `Voice ID: ${choice.voiceId}` : ''].filter(Boolean);
+      if (details.length) body.appendChild(el('p', { class: 'media-choice-file', text: details.join(' · ') }));
+    } else {
+      if (choice.prompt) body.appendChild(el('p', { class: 'media-choice-prompt', text: choice.prompt }));
+      if (choice.filePath) body.appendChild(el('p', { class: 'media-choice-file', text: choice.filePath }));
+    }
 
     const grid = el('div', { class: 'media-choice-grid' });
     choice.candidates.forEach((candidate) => {
       const selected = choice.selectedIndex !== null && Number(candidate.index) === Number(choice.selectedIndex);
       const figure = el('figure', { class: `media-choice-option${selected ? ' is-selected' : ''}` });
-      if (candidate.url) {
+      if (isVoice) {
+        if (candidate.url) {
+          const audio = el('audio', {
+            controls: true, preload: 'metadata', src: candidate.url,
+            'aria-label': `Listen to voice option ${candidate.index + 1}`,
+            'data-preserve-key': `voice-choice:${choice.id || choice.toolCallId || 'saved'}:${candidate.index}:${candidate.hash || candidate.url}`
+          });
+          audio.addEventListener('play', () => {
+            const record = voiceStatsRecord(choice);
+            record.playCounts[candidate.index] = (Number(record.playCounts[candidate.index]) || 0) + 1;
+            record.startedAt[candidate.index] = performance.now();
+            card.querySelectorAll('audio').forEach((other) => { if (other !== audio && !other.paused) other.pause(); });
+          });
+          audio.addEventListener('pause', () => flushVoiceListening(choice, candidate.index));
+          audio.addEventListener('ended', () => flushVoiceListening(choice, candidate.index));
+          figure.appendChild(el('div', { class: 'media-choice-preview is-voice' },
+            el('span', { class: 'voice-choice-icon' }, iconEl('mic')), audio));
+        } else {
+          figure.appendChild(el('div', { class: 'media-choice-preview is-placeholder' }, iconEl('mic')));
+        }
+      } else if (candidate.url) {
         figure.appendChild(el('a', {
           class: 'media-choice-preview', href: candidate.url, target: '_blank', rel: 'noopener noreferrer',
           title: 'Open full size', 'aria-label': `Open image option ${candidate.index + 1} full size`
@@ -4133,21 +4606,29 @@ You can start with a more structured option: one script, short captions, and a c
       caption.appendChild(el('div', { class: 'media-choice-caption-head' },
         el('span', { class: 'media-choice-option-label', text: `Option ${candidate.index + 1}` }),
         selected ? el('span', { class: 'media-choice-selected' }, iconEl('check'), el('span', { text: 'Selected' })) : null));
-      if (completed || submitting) {
+      if (!isVoice && (completed || submitting)) {
         const model = candidate.model_name || (candidate.is_private ? 'Private model' : 'Model not revealed yet');
         caption.appendChild(el('div', { class: 'media-choice-model', text: candidate.organization ? `${model} · ${candidate.organization}` : model }));
+      }
+      if (isVoice && (completed || submitting)) {
+        const position = choice.candidates.indexOf(candidate);
+        const plays = Number(choice.playCounts?.[position]);
+        const seconds = Number(choice.listenSeconds?.[position]);
+        const stats = [Number.isFinite(plays) && plays ? `Played ${plays}×` : '',
+          Number.isFinite(seconds) && seconds ? `Listened ${seconds.toFixed(1)}s` : ''].filter(Boolean);
+        if (stats.length) caption.appendChild(el('div', { class: 'media-choice-model', text: stats.join(' · ') }));
       }
       const actions = el('div', { class: 'media-choice-actions' });
       if (candidate.url) {
         actions.appendChild(el('a', {
           class: 'button button-small button-quiet', href: candidate.url, target: '_blank', rel: 'noopener noreferrer'
-        }, iconEl('external'), el('span', { text: 'Full size' })));
+        }, iconEl('external'), el('span', { text: isVoice ? 'Open audio' : 'Full size' })));
       }
       if (pending && choice.id) {
         const use = el('button', {
           class: 'button button-small', type: 'button', disabled: Boolean(submitting),
-          'aria-label': `Use image option ${candidate.index + 1}`
-        }, iconEl('check'), el('span', { text: 'Use this image' }));
+          'aria-label': `Use ${noun} option ${candidate.index + 1}`
+        }, iconEl('check'), el('span', { text: `Use this ${noun}` }));
         use.addEventListener('click', () => {
           void answerMediaChoiceUI(choice, { selected_index: candidate.index }, card);
         });
@@ -4164,11 +4645,11 @@ You can start with a more structured option: one script, short captions, and a c
       const skip = el('button', { class: 'button button-small button-quiet', type: 'button', disabled: Boolean(submitting) },
         el('span', { text: 'Skip choice' }));
       skip.addEventListener('click', () => { void answerMediaChoiceUI(choice, { skip: true }, card); });
-      footer.append(skip, el('span', { class: 'media-choice-note', text: 'Skip uses the first image, like Arena does when no choice is made.' }));
+      footer.append(skip, el('span', { class: 'media-choice-note', text: `Skip uses the first ${noun}, like Arena does when no choice is made.` }));
       body.appendChild(footer);
     } else if (pending && !choice.id) {
       body.appendChild(el('p', { class: 'media-choice-note', text: 'This saved choice is no longer waiting in the app.' }));
-    } else if ((completed || submitting) && !choice.candidates.some((candidate) => candidate.model_name || candidate.is_private)) {
+    } else if (!isVoice && (completed || submitting) && !choice.candidates.some((candidate) => candidate.model_name || candidate.is_private)) {
       body.appendChild(el('p', { class: 'media-choice-note', text: 'Waiting for Arena to reveal the models for both images…' }));
     }
     card.appendChild(body);
@@ -4192,7 +4673,7 @@ You can start with a more structured option: one script, short captions, and a c
       return !visible.some((shown) => sameMediaChoice(shown, choice));
     });
     if (!mine.length) return null;
-    const section = el('section', { class: 'message-turn', 'aria-label': 'Image choice from Arena Agent' });
+    const section = el('section', { class: 'message-turn', 'aria-label': 'Media choice from Arena Agent' });
     mine.forEach((choice) => section.appendChild(renderMediaChoiceCard(choice)));
     return section;
   }
@@ -4266,22 +4747,46 @@ You can start with a more structured option: one script, short captions, and a c
     }).catch(() => { state.eloModels = {}; state._eloLoading = false; });
   }
 
-  function exportChatMd() {
+  function exportChatMd(format = 'md') {
     const id = state.activeChatId;
     if (!id) return;
+    const extension = format === 'html' ? 'html' : 'md';
     if (state.demo) {
-      const text = state.messages.map((turn) => {
-        const parts = [];
-        if (turn.user?.content) parts.push(`## User\n\n${turn.user.content}`);
-        Object.values(turn.lanes || {}).forEach((lane) => { if (lane.text) parts.push(`## ${lane.modelName || 'Assistant'}\n\n${lane.text}`); });
-        return parts.join('\n\n');
-      }).join('\n\n');
-      const blob = new Blob([`# ${state.activeChatTitle || 'Chat'}\n\n${text}`], { type: 'text/markdown' });
-      const a = el('a', { href: URL.createObjectURL(blob), download: 'chat.md' });
+      let blob;
+      if (extension === 'html') {
+        const main = el('main');
+        main.appendChild(el('p', { class: 'eyebrow', text: 'Arena Desktop export' }));
+        main.appendChild(el('h1', { text: state.activeChatTitle || 'Chat' }));
+        state.messages.forEach((turn) => {
+          if (turn.user?.content) {
+            const section = el('section', { class: 'message user' });
+            section.append(el('h2', { text: 'User' }), el('pre', { text: turn.user.content }));
+            main.appendChild(section);
+          }
+          Object.values(turn.lanes || {}).forEach((lane) => {
+            if (!lane.text) return;
+            const section = el('section', { class: 'message' });
+            section.append(el('h2', { text: lane.modelName || 'Assistant' }), el('pre', { text: lane.text }));
+            main.appendChild(section);
+          });
+        });
+        const htmlText = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"><style>body{font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;line-height:1.6}.eyebrow{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.message{padding:18px 0;border-bottom:1px solid #ddd}.user{background:#f3f3f0;padding:18px;border:1px solid #ddd;border-radius:12px}pre{white-space:pre-wrap;font:inherit}</style></head><body>${main.outerHTML}</body></html>`;
+        blob = new Blob([htmlText], { type: 'text/html' });
+      } else {
+        const text = state.messages.map((turn) => {
+          const parts = [];
+          if (turn.user?.content) parts.push(`## User\n\n${turn.user.content}`);
+          Object.values(turn.lanes || {}).forEach((lane) => { if (lane.text) parts.push(`## ${lane.modelName || 'Assistant'}\n\n${lane.text}`); });
+          return parts.join('\n\n');
+        }).join('\n\n');
+        blob = new Blob([`# ${state.activeChatTitle || 'Chat'}\n\n${text}`], { type: 'text/markdown' });
+      }
+      const a = el('a', { href: URL.createObjectURL(blob), download: `chat.${extension}` });
       document.body.appendChild(a); a.click(); a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(a.href), 1000);
       return;
     }
-    const a = el('a', { href: `/api/chats/${encodeURIComponent(id)}/export.md`, download: '' });
+    const a = el('a', { href: `/api/chats/${encodeURIComponent(id)}/export.${extension}`, download: '' });
     document.body.appendChild(a); a.click(); a.remove();
   }
 
@@ -4543,6 +5048,7 @@ You can start with a more structured option: one script, short captions, and a c
     const content = els.content;
     const previousScroll = content?.scrollTop || 0;
     const wasNearBottom = content ? content.scrollHeight - content.scrollTop - content.clientHeight < 140 : true;
+    const uiSnapshot = captureMessageUiState();
     clear(els.messageList);
 
     if (state.historyLoading) {
@@ -4578,7 +5084,7 @@ You can start with a more structured option: one script, short captions, and a c
 
     const renderedPermissions = new Set();
     let pairIndex = -1;
-    state.messages.forEach((turn) => {
+    state.messages.forEach((turn, turnIndex) => {
       if (turn.lanes) {
         Object.values(turn.lanes).forEach((lane) => {
           (lane.permissions || []).forEach((permission) => {
@@ -4593,7 +5099,8 @@ You can start with a more structured option: one script, short captions, and a c
       }
       const isPair = Boolean(turn?.lanes?.a && turn?.lanes?.b);
       if (isPair) pairIndex += 1;
-      els.messageList.appendChild(renderTurn(turn, isPair ? pairIndex : -1));
+      const uiKey = `${state.activeChatId || 'new'}:${turn.msgEnd ?? turn.id ?? turnIndex}`;
+      els.messageList.appendChild(renderTurn(turn, isPair ? pairIndex : -1, uiKey));
     });
     const unattached = renderUnattachedPermissions(renderedPermissions);
     if (unattached) els.messageList.appendChild(unattached);
@@ -4603,6 +5110,7 @@ You can start with a more structured option: one script, short captions, and a c
     if (mediaChoices) els.messageList.appendChild(mediaChoices);
     const todos = renderUnattachedTodos();
     if (todos) els.messageList.appendChild(todos);
+    restoreMessageUiState(uiSnapshot);
 
     if (content) {
       if (!preserveScroll || wasNearBottom) {
@@ -4619,10 +5127,30 @@ You can start with a more structured option: one script, short captions, and a c
 
   function scheduleChatRender() {
     if (state._renderFrame) return;
+    if (chatRenderBlocked()) {
+      state._renderDeferred = true;
+      if (!state._renderRetryTimer) {
+        state._renderRetryTimer = window.setTimeout(() => {
+          state._renderRetryTimer = null;
+          if (state._renderDeferred) scheduleChatRender();
+        }, 700);
+      }
+      return;
+    }
+    state._renderDeferred = false;
     state._renderFrame = requestAnimationFrame(() => {
       state._renderFrame = null;
+      if (chatRenderBlocked()) {
+        state._renderDeferred = true;
+        scheduleChatRender();
+        return;
+      }
       if (state.view === 'chat') renderMessages();
     });
+  }
+
+  function flushDeferredChatRender() {
+    if (state._renderDeferred && !chatRenderBlocked()) scheduleChatRender();
   }
 
   function renderChatArea() {
@@ -4728,6 +5256,7 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   let gatewayWarmAttempted = false;
+  let gatewayWarmLastAttempt = 0;
   let gatewayWasActive = false;
 
   function maybeWarmGateway() {
@@ -4739,8 +5268,11 @@ You can start with a more structured option: one script, short captions, and a c
     // A session that was live and then stopped (Stop button, idle expiry)
     // must not strand the latch: the next Agent send warms a fresh tunnel.
     if (gatewayWasActive) { gatewayWasActive = false; gatewayWarmAttempted = false; }
-    if (gatewayWarmAttempted) return;
+    // A failed warm-up (slow tunnel DNS, transient 502) must not latch the
+    // gateway off for the whole app run: retry after a cooldown instead.
+    if (gatewayWarmAttempted && Date.now() - gatewayWarmLastAttempt < 60000) return;
     gatewayWarmAttempted = true;
+    gatewayWarmLastAttempt = Date.now();
     void API.startGateway().catch(() => undefined); // problems surface via status/JIT
   }
 
@@ -4753,6 +5285,92 @@ You can start with a more structured option: one script, short captions, and a c
       for (const lane of Object.values(turn.lanes || {})) total += String(lane?.text || '').length;
     }
     return total;
+  }
+
+  const HEAVY_SEND_CONTEXT_CHARS = 60000;
+
+  function isLightModel(model) {
+    return /(mini|flash|lite|haiku|nano)/i.test(`${model?.id || ''} ${model?.name || ''}`);
+  }
+
+  function isPremiumModel(model) {
+    if (!model || isLightModel(model)) return false;
+    if (model.is_router) return true;
+    const capabilities = `${model.id || ''} ${model.name || ''} ${(model.capabilities || []).join(' ')}`.toLowerCase();
+    if (/(premium|flagship|frontier)/.test(capabilities)) return true;
+    const rank = Number(eloForModel(model)?.rank ?? model.rank);
+    if (Number.isFinite(rank) && rank > 0 && rank <= 15) return true;
+    // Names are only a fallback for catalogues without a rank. Word-ish
+    // boundaries avoid treating "professional" or "maximum" as a tier.
+    return /(^|[^a-z])(opus|ultra|max|pro|o3-pro|o4-pro)([^a-z]|$)/i.test(`${model.id || ''} ${model.name || ''}`);
+  }
+
+  function selectedSendModels() {
+    if (state.mode === 'direct' && Array.isArray(state.fanoutModels) && state.fanoutModels.length >= 2) {
+      return state.fanoutModels.map((id) => getModel(id)).filter(Boolean);
+    }
+    if (state.mode === 'side-by-side') return [currentModelA(), currentModelB()].filter(Boolean);
+    if (state.mode === 'direct') return [currentModelA()].filter(Boolean);
+    return [];
+  }
+
+  function heavySendAssessment() {
+    const promptChars = String(els.prompt?.value || '').length;
+    const contextChars = Math.max(state.historyChars || 0, estimateHistoryChars()) + promptChars;
+    const models = selectedSendModels();
+    const premiumModels = models.filter(isPremiumModel);
+    const potentiallyHeavy = contextChars >= HEAVY_SEND_CONTEXT_CHARS && premiumModels.length > 0;
+    if (!potentiallyHeavy) return null;
+    if (state.generating && !promptChars) return null;
+    const factors = [
+      `about ${Math.round(contextChars / 1000)}k characters of context`,
+      `${premiumModels.map((model) => model.name).join(', ')} is a premium-tier selection`
+    ];
+    if (models.length > 1) factors.push(`${models.length} selected models`);
+    if (state.directTools && state.workspaceChosen && state.mode === 'direct') {
+      factors.push('Workspace Sync can repeat this context over several tool rounds');
+    }
+    if (state.attachments?.length) factors.push(`${state.attachments.length} attachment(s)`);
+    if (state.usageToday) {
+      factors.push(`this app's own log already has ${state.usageToday.sends || 0} sends and ${state.usageToday.rate_limits || 0} rate limits for the current account today`);
+    }
+    return { contextChars, premiumModels, models, factors };
+  }
+
+  function refreshUsageTelemetry() {
+    const now = Date.now();
+    if (state.usageLoading || now - (state.usageLoadedAt || 0) < 60000) return;
+    state.usageLoading = true;
+    API.getUsage().then((data) => {
+      const today = data?.days?.[data?.today] || {};
+      const account = today[data?.current_account] || today[state.currentAccountId] || null;
+      state.usageToday = account
+        ? { sends: Number(account.sends) || 0, rate_limits: Number(account.rate_limits) || 0 }
+        : null;
+      state.usageLoadedAt = Date.now();
+    }).catch(() => {
+      state.usageLoadedAt = Date.now();
+    }).finally(() => {
+      state.usageLoading = false;
+      syncHeavySendBadge();
+    });
+  }
+
+  function syncHeavySendBadge() {
+    const badge = els.heavySendBadge;
+    if (!badge) return;
+    const assessment = heavySendAssessment();
+    if (!assessment) {
+      badge.hidden = true;
+      badge.removeAttribute('title');
+      return;
+    }
+    refreshUsageTelemetry();
+    const label = `Heavy send · ~${Math.round(assessment.contextChars / 1000)}k`;
+    if (els.heavySendLabel) els.heavySendLabel.textContent = label;
+    badge.title = `This send may use a large part of Arena's daily balance: ${assessment.factors.join('; ')}. Heuristic only — not Arena's exact remaining balance. Open Usage.`;
+    badge.setAttribute('aria-label', `${label}. Open Usage details`);
+    badge.hidden = false;
   }
 
   function syncCompactChip() {
@@ -4968,7 +5586,8 @@ You can start with a more structured option: one script, short captions, and a c
     else if (state.historyError) disabledReason = "History not loaded — please try again";
     else if (!isValidSelection(state.mode, state.modality)) disabledReason = selectionIssue(state.mode, state.modality);
     else if (attachmentsBusy()) disabledReason = "Uploading files…";
-    else if (attachmentsFailed()) disabledReason = "Remove the failed file to send";
+    else if (attachmentsFailed()) disabledReason = "Retry or remove the failed file to send";
+    else if (attachmentCompatibilityIssue()) disabledReason = attachmentCompatibilityIssue();
     else if (noAuth) disabledReason = "First, log in in a separate window or using cookies";
     else if (!text) disabledReason = "Enter a message";
     else if (!requiredModelsReady()) disabledReason = state.modelsLoading ? "Loading models"
@@ -5021,6 +5640,7 @@ You can start with a more structured option: one script, short captions, and a c
     const locked = chatLocked();
     syncWorkspaceSyncToggle();
     syncCompactChip();
+    syncHeavySendBadge();
     els.modeButton.disabled = busy || locked;
     els.modalityButton.disabled = busy || locked;
     els.permissionButton.disabled = busy || transitions;
@@ -5337,7 +5957,8 @@ You can start with a more structured option: one script, short captions, and a c
             const stepName = step.tool === 'ask_user' ? 'Question'
               : (step.tool === 'propose_plan' ? 'Plan'
                 : (step.tool === 'generate_image' ? 'Generate image'
-                  : (step.tool === 'set_todos' ? 'Checklist' : step.name)));
+                  : (step.tool === 'add_voice' ? 'Choose voice'
+                    : (step.tool === 'set_todos' ? 'Checklist' : step.name))));
             const activity = normalizeActivity({ ...step, name: stepName, detail: stepDetail, status: step.status || (step.ok ? 'ok' : 'error') }, 'tool');
             if (activity) lane.activities.push(activity);
             if (step.media_choice || step.mediaChoice) {
@@ -6360,7 +6981,8 @@ You can start with a more structured option: one script, short captions, and a c
       revealed: false,
       chatId,
       mode,
-      modality: state.modality
+      modality: state.modality,
+      toolsEnabled: Boolean(state.directTools)
     };
   }
 
@@ -6502,6 +7124,37 @@ You can start with a more structured option: one script, short captions, and a c
     if (list.length >= 10) return 'Attach up to 10 files per message.';
     return null;
   }
+  function attachmentInputKinds(attachments = state.attachments) {
+    const kinds = new Set();
+    (attachments || []).forEach((attachment) => {
+      kinds.add(String(attachment?.mediaType || attachment?.media_type || '').startsWith('image/') ? 'image' : 'file');
+    });
+    return kinds;
+  }
+  function modelCanReceiveAttachments(model, attachments = state.attachments) {
+    if (!model) return false;
+    const kinds = attachmentInputKinds(attachments);
+    if (kinds.has('image') && model.supports_image_input === false) return false;
+    if (kinds.has('file') && model.supports_file_input === false) return false;
+    return true;
+  }
+  function attachmentCompatibilityIssue() {
+    if (!state.attachments.length) return '';
+    if (state.mode === 'agent' || state.mode === 'battle' || isAgentBackend()) return '';
+    const models = state.mode === 'side-by-side'
+      ? [['Model A', currentModelA()], ['Model B', currentModelB()]]
+      : (state.mode === 'direct' && Array.isArray(state.fanoutModels) && state.fanoutModels.length >= 2
+        ? state.fanoutModels.map((id) => ['A fan-out model', getModel(id)])
+        : [['The selected model', currentModelA()]]);
+    for (const [label, model] of models) {
+      if (!model || modelCanReceiveAttachments(model)) continue;
+      const kinds = attachmentInputKinds();
+      const noun = kinds.has('image') && kinds.has('file') ? 'image and file attachments'
+        : kinds.has('image') ? 'image attachments' : 'file attachments';
+      return `${label} (${model.name}) does not accept ${noun}. Choose a compatible model or remove the attachment.`;
+    }
+    return '';
+  }
   function attachmentsBusy() {
     return state.attachments.some((item) => item.status === 'uploading');
   }
@@ -6510,6 +7163,27 @@ You can start with a more structured option: one script, short captions, and a c
   }
   function readyAttachments() {
     return state.attachments.filter((item) => item.status === 'ready' && item.result);
+  }
+  function attachmentMetaText(item) {
+    if (item.status === 'error') return item.error || 'Upload failed';
+    const image = item.imageMeta || {};
+    const format = String(image.format || item.mediaType?.split('/')[1] || item.mediaType || 'File').toUpperCase();
+    const bits = [format];
+    if (image.width && image.height) bits.push(`${image.width}×${image.height}`);
+    if (image.normalized) bits.push('normalized');
+    bits.push(formatBytes(item.size));
+    if (item.status === 'uploading') bits.push('uploading…');
+    return bits.filter(Boolean).join(' · ');
+  }
+  function attachmentDiagnosticTitle(item) {
+    const image = item.imageMeta || {};
+    const bits = [`Added by ${item.source || 'picker'}`, `Type ${item.mediaType || 'unknown'}`];
+    if (image.width && image.height) bits.push(`${image.width}×${image.height}${image.mode ? ` ${image.mode}` : ''}`);
+    if (image.normalized) bits.push(`normalized${image.reasons?.length ? ` (${image.reasons.join(', ')})` : ''}`);
+    if (item.attempts) bits.push(`attempt ${item.attempts}`);
+    if (item.diagnosticStage) bits.push(`stage ${item.diagnosticStage}`);
+    if (item.diagnosticId) bits.push(`diagnostic ${item.diagnosticId}`);
+    return bits.join(' · ');
   }
   function renderAttachmentStrip() {
     const strip = els.attachmentStrip;
@@ -6525,9 +7199,14 @@ You can start with a more structured option: one script, short captions, and a c
       }
       chip.appendChild(el('span', { class: 'attachment-copy' },
         el('span', { class: 'attachment-name', text: item.name, title: item.name }),
-        el('span', { class: 'attachment-meta', text: item.status === 'error' ? (item.error || 'Upload failed') : formatBytes(item.size) })
+        el('span', { class: 'attachment-meta', text: attachmentMetaText(item), title: attachmentDiagnosticTitle(item) })
       ));
       if (item.status === 'uploading') chip.appendChild(el('span', { class: 'mini-spinner', 'aria-hidden': 'true' }));
+      if (item.status === 'error' && item.file) {
+        const retry = el('button', { class: 'attachment-remove attachment-retry', type: 'button', 'aria-label': `Retry uploading ${item.name}`, title: 'Retry upload' }, iconEl('refresh'));
+        retry.addEventListener('click', () => retryAttachment(item));
+        chip.appendChild(retry);
+      }
       const remove = el('button', { class: 'attachment-remove', type: 'button', 'aria-label': `Remove ${item.name}`, title: 'Remove' }, iconEl('x'));
       remove.addEventListener('click', () => removeAttachment(item.id));
       chip.appendChild(remove);
@@ -6572,13 +7251,13 @@ You can start with a more structured option: one script, short captions, and a c
     try {
       const blob = await API.downloadWorkspaceFile(path);
       const name = String(path || 'file').split(/[\\/]/).pop() || 'file';
-      addFiles([new File([blob], name, { type: blob.type || '' })]);
+      addFiles([new File([blob], name, { type: blob.type || '' })], 'workspace');
     } catch (error) {
       toast(errorMessage(error), 'error', 'Could not attach the workspace file');
     }
   }
 
-  function addFiles(fileList) {
+  function addFiles(fileList, source = 'picker') {
     const files = Array.from(fileList || []).filter((file) => file && typeof file.size === 'number');
     if (!files.length) return;
     if (state.generating) {
@@ -6601,7 +7280,13 @@ You can start with a more structured option: one script, short captions, and a c
         kind,
         name: file.name || (mediaType.startsWith('image/') ? 'pasted-image.png' : 'file'),
         size: file.size,
+        originalSize: file.size,
         mediaType,
+        source: ['picker', 'paste', 'drop', 'workspace'].includes(source) ? source : 'picker',
+        attempts: 0,
+        diagnosticId: null,
+        diagnosticStage: null,
+        imageMeta: null,
         status: 'uploading',
         error: null,
         result: null,
@@ -6614,15 +7299,36 @@ You can start with a more structured option: one script, short captions, and a c
     renderAttachmentStrip();
     updateComposerState();
   }
+  function retryAttachment(item) {
+    if (!item || item.status === 'uploading' || !state.attachments.includes(item)) return;
+    item.status = 'uploading';
+    item.error = null;
+    item.result = null;
+    renderAttachmentStrip();
+    updateComposerState();
+    uploadChain = uploadChain.then(() => uploadOneAttachment(item)).catch(() => undefined);
+  }
   async function uploadOneAttachment(item) {
     if (!state.attachments.includes(item)) return;
+    item.attempts = (Number(item.attempts) || 0) + 1;
+    item.diagnosticStage = 'uploading';
     try {
-      const result = await API.uploadAttachment(item.file, item.kind, item.kind === 'evaluation' ? state.modality : '');
+      const result = await API.uploadAttachment(
+        item.file, item.kind, item.kind === 'evaluation' ? state.modality : '',
+        { source: item.source || 'picker', appMode: state.mode, attempt: item.attempts });
       item.result = result;
+      item.name = result?.name || result?.filename || item.name;
+      item.mediaType = result?.mediaType || result?.contentType || item.mediaType;
+      if (Number.isFinite(Number(result?.size))) item.size = Number(result.size);
+      item.imageMeta = result?.image || null;
+      item.diagnosticId = result?.diagnostic_id || null;
+      item.diagnosticStage = result?.stage || 'complete';
       item.status = 'ready';
     } catch (error) {
       item.status = 'error';
       item.error = errorMessage(error);
+      item.diagnosticId = error?.details?.diagnostic_id || null;
+      item.diagnosticStage = error?.details?.stage || null;
       toast(item.error, 'error', `Could not attach ${item.name}`);
     }
     renderAttachmentStrip();
@@ -6648,6 +7354,24 @@ You can start with a more structured option: one script, short captions, and a c
       size: Number(item.size) || 0,
       previewUrl: null
     }));
+  }
+
+  function restoreFailedSend(generation) {
+    if (!generation || generation._draftRestored || generation.stopRequested) return;
+    if (!generation.chatId || String(state.activeChatId) !== String(generation.chatId)) return;
+    generation._draftRestored = true;
+    const text = generation.turn?.user?.content || '';
+    if (text && els.prompt && !els.prompt.value.trim()) {
+      els.prompt.value = text;
+      state.draft = text;
+      saveComposerDraft();
+      resizePrompt();
+    }
+    if (Array.isArray(generation.composerAttachments) && generation.composerAttachments.length && !state.attachments.length) {
+      state.attachments = generation.composerAttachments.map((item) => ({ ...item }));
+      renderAttachmentStrip();
+    }
+    updateComposerState();
   }
 
   async function sendMessage() {
@@ -6676,7 +7400,7 @@ You can start with a more structured option: one script, short captions, and a c
       return;
     }
     if (attachmentsFailed()) {
-      toast('One file did not upload. Remove it (×) and send again.', 'warning', 'Attachment failed');
+      toast('One file did not upload. Retry it or remove it (×), then send again.', 'warning', 'Attachment failed');
       return;
     }
     if (state.modality === 'video' && text.length > 2500) {
@@ -6732,6 +7456,12 @@ You can start with a more structured option: one script, short captions, and a c
         }
         return;
       }
+      const compatibilityIssue = attachmentCompatibilityIssue();
+      if (compatibilityIssue) {
+        toast(compatibilityIssue, 'warning', 'Attachment is not supported by this model');
+        if (allowsManualModels()) openModelPicker(state.mode === 'side-by-side' && currentModelA() && modelCanReceiveAttachments(currentModelA()) ? 'b' : 'a');
+        return;
+      }
 
       let chatId = state.activeChatId;
       if (!chatId) {
@@ -6773,6 +7503,7 @@ You can start with a more structured option: one script, short captions, and a c
         if (!state.modelBId) throw new ApiError("Model B not selected.");
         body.model_id_b = state.modelBId;
       }
+      const composerAttachments = state.attachments.map((item) => ({ ...item }));
       const sentAttachments = turnAttachmentsFromComposer();
       if (state.mode === 'direct' && Array.isArray(state.fanoutModels) && state.fanoutModels.length >= 2) {
         body.fanout_models = [...state.fanoutModels];
@@ -6798,7 +7529,7 @@ You can start with a more structured option: one script, short captions, and a c
       renderAttachmentStrip();
       resetPromptHeight();
       const controller = new AbortController();
-      const generation = { turn, controller, chatId: String(chatId), hadError: false, done: false, finished: false, abortTimer: null, stopRequested: false };
+      const generation = { turn, controller, chatId: String(chatId), hadError: false, done: false, finished: false, abortTimer: null, stopRequested: false, composerAttachments };
       state.generations.set(generation.chatId, generation);
       state.chatTurns[generation.chatId] = state.messages;
       markChatSeen(generation.chatId);
@@ -6820,6 +7551,7 @@ You can start with a more structured option: one script, short captions, and a c
           Object.values(turn.lanes).forEach((lane) => { lane.stopped = true; lane.streaming = false; });
         }
       } finally {
+        if (generation.hadError) restoreFailedSend(generation);
         finishGeneration(generation, { aborted: controller.signal.aborted });
       }
     } catch (error) {
@@ -7226,13 +7958,18 @@ You can start with a more structured option: one script, short captions, and a c
         if (recentModels.length && index === 0) list.appendChild(el('div', { class: 'popover-group-label', text: 'Recent' }));
         if (recentModels.length && index === recentModels.length) list.appendChild(el('div', { class: 'popover-group-label', text: 'All models' }));
         const conflicts = effectiveLane === 'b' && String(state.modelAId) === String(model.id);
+        const attachmentBlocked = state.attachments.length > 0 && !modelCanReceiveAttachments(model);
+        const attachmentKinds = attachmentInputKinds();
+        const attachmentTag = attachmentBlocked
+          ? (attachmentKinds.has('image') && attachmentKinds.has('file') ? 'no files' : attachmentKinds.has('image') ? 'no images' : 'no files')
+          : '';
         const capsText = (model.capabilities || []).join(' ').toLowerCase();
         const elo = eloForModel(model);
         const meta = [
           elo?.rank ? `Elo #${elo.rank}` : (model.rank ? `#${model.rank}` : ''),
           elo?.score ? `${elo.score}` : (model.arena_score ? `rating ${model.arena_score}` : ''),
-          (capsText.includes('vision') || capsText.includes('image')) ? 'Vision' : '',
-          (capsText.includes('pdf') || capsText.includes('document')) ? 'Docs' : '',
+          (model.supports_image_input === true || capsText.includes('vision') || capsText.includes('image')) ? 'Vision' : '',
+          (model.supports_file_input === true || capsText.includes('pdf') || capsText.includes('document')) ? 'Docs' : '',
           /(mini|flash|lite|haiku|nano)/i.test(`${model.id || ''} ${model.name || ''}`) ? 'Light (saves daily balance)' : ''
         ].filter(Boolean).join(' · ');
         const option = popoverOption({
@@ -7240,8 +7977,8 @@ You can start with a more structured option: one script, short captions, and a c
           desc: `${model.org || "Unknown organization"}${model.capabilities.length ? ` · ${model.capabilities.slice(0, 3).join(' · ')}` : ''}`,
           icon: '',
           selected: String(selectedId) === String(model.id),
-          disabled: conflicts,
-          tag: conflicts ? "in A" : '',
+          disabled: conflicts || attachmentBlocked,
+          tag: conflicts ? "in A" : attachmentTag,
           meta,
           onClick: () => {
             if (selectModel(effectiveLane, model.id)) closePopover();
@@ -7309,8 +8046,11 @@ You can start with a more structured option: one script, short captions, and a c
       const q = searchInput.value.trim().toLocaleLowerCase('en');
       state.models.filter((m) => !q || `${m.name} ${m.org}`.toLocaleLowerCase('en').includes(q)).forEach((model) => {
         const on = chosen.has(String(model.id));
+        const attachmentBlocked = state.attachments.length > 0 && !modelCanReceiveAttachments(model);
+        if (attachmentBlocked && on) chosen.delete(String(model.id));
         list.appendChild(popoverOption({
-          title: model.name, desc: model.org || '', icon: '', selected: on,
+          title: model.name, desc: model.org || '', icon: '', selected: on && !attachmentBlocked,
+          disabled: attachmentBlocked, tag: attachmentBlocked ? 'attachments unsupported' : '',
           onClick: () => {
             if (on) chosen.delete(String(model.id));
             else if (chosen.size >= 4) { toast('At most 4 models per fan-out.', 'warning'); return; }
@@ -7435,6 +8175,310 @@ You can start with a more structured option: one script, short captions, and a c
       onMount?.({ close, modal, body, footer });
     });
     return { close, modal, body, footer };
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Command palette (Ctrl+K)                                              */
+  /* ---------------------------------------------------------------------- */
+  function openCommandPalette() {
+    const input = el('input', {
+      class: 'input command-palette-input', type: 'search', autocomplete: 'off',
+      placeholder: 'Search chats and commands…', 'aria-label': 'Search chats and commands',
+      role: 'combobox', 'aria-expanded': 'true', 'aria-controls': 'command-palette-results',
+      'data-autofocus': ''
+    });
+    const status = el('p', { class: 'command-palette-status', 'aria-live': 'polite' });
+    const results = el('div', {
+      class: 'command-palette-results', id: 'command-palette-results', role: 'listbox',
+      'aria-label': 'Commands and chats'
+    });
+    const content = el('div', { class: 'command-palette' },
+      el('div', { class: 'command-palette-search' }, iconEl('search'), input),
+      status, results,
+      el('div', { class: 'command-palette-hints' },
+        el('span', {}, el('kbd', { text: '↑' }), el('kbd', { text: '↓' }), el('span', { text: 'Navigate' })),
+        el('span', {}, el('kbd', { text: 'Enter' }), el('span', { text: 'Open' })),
+        el('span', {}, el('kbd', { text: 'Esc' }), el('span', { text: 'Close' }))));
+
+    let handle = null;
+    let closed = false;
+    let query = '';
+    let remoteHits = [];
+    let searching = false;
+    let renderedItems = [];
+    let activeKey = '';
+    let searchTimer = 0;
+    let requestSequence = 0;
+
+    const selectionReason = () => {
+      if (chatLocked()) return 'Available in a new chat';
+      if (state.generating) return 'Available after generation finishes';
+      return '';
+    };
+
+    const paletteActions = () => {
+      const reason = selectionReason();
+      const actions = [{
+        key: 'action:new-chat', icon: 'plus', title: 'New chat', detail: 'Start an empty conversation',
+        keywords: 'create conversation fresh', run: () => createNewChat()
+      }];
+      MODES.filter((item) => item.id !== state.mode).forEach((item) => actions.push({
+        key: `action:mode:${item.id}`, icon: item.icon, title: `Switch to ${item.label}`,
+        detail: reason || item.desc, keywords: `mode ${item.id} ${item.label}`,
+        disabled: Boolean(reason), run: () => changeMode(item.id)
+      }));
+      modalityOptionsForMode(state.mode).filter((item) => item.id !== state.modality).forEach((item) => actions.push({
+        key: `action:modality:${item.id}`, icon: item.icon, title: `Use ${item.label} work type`,
+        detail: reason || item.desc, keywords: `work type modality ${item.id} ${item.label}`,
+        disabled: Boolean(reason), run: () => changeModality(item.id)
+      }));
+      actions.push({
+        key: 'action:model', icon: 'layers',
+        title: state.mode === 'side-by-side' ? 'Choose models' : 'Choose model',
+        detail: !allowsManualModels()
+          ? 'Manual model selection is not available in this mode'
+          : reason || 'Open the model picker',
+        keywords: 'model picker select lane', disabled: !allowsManualModels() || Boolean(reason),
+        run: () => openModelPicker('a', els.modelsNavBtn || els.modeButton)
+      });
+      actions.push(
+        {
+          key: 'action:focus-composer', icon: 'message', title: 'Focus composer',
+          detail: 'Return to the message box', keywords: 'write prompt input compose',
+          run: () => focusComposer()
+        },
+        {
+          key: 'action:sidebar', icon: 'panel-left',
+          title: state.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar',
+          detail: 'Toggle the chat list', keywords: 'navigation panel chats',
+          run: () => setSidebarCollapsed(!state.sidebarCollapsed)
+        },
+        {
+          key: 'action:workspace-panel', icon: 'panel-right',
+          title: state.workspacePanelOpen ? 'Close Workspace panel' : 'Open Workspace panel',
+          detail: 'Files and connectors', keywords: 'workspace files connectors panel',
+          run: () => setWorkspacePanelOpen(!state.workspacePanelOpen)
+        },
+        {
+          key: 'action:workspace-git', icon: 'git-branch', title: 'Open Workspace Git',
+          detail: 'Status, diff, stage and commit locally', keywords: 'git status diff stage commit repository',
+          run: () => { setWorkspacePanelOpen(true); setWorkspaceTab('git'); }
+        },
+        {
+          key: 'action:workspace-sync', icon: 'refresh',
+          title: state.directTools ? 'Turn Workspace Sync off' : 'Turn Workspace Sync on',
+          detail: state.directTools ? 'Models cannot touch the selected folder' : 'Models can work in the selected folder',
+          keywords: 'workspace sync tools folder agent',
+          run: () => setWorkspaceSync(!state.directTools)
+        },
+        {
+          key: 'action:settings', icon: 'settings', title: 'Open Settings',
+          detail: 'Connection, Arena, memory and application options', keywords: 'preferences options configuration',
+          run: () => openSettings()
+        },
+        {
+          key: 'action:help', icon: 'help', title: 'Keyboard shortcuts and help',
+          detail: 'How Arena Desktop works', keywords: 'help shortcuts keyboard guide',
+          run: () => openHelp()
+        }
+      );
+      if (state.activeChatId) {
+        actions.push(
+          {
+            key: 'action:compact', icon: 'compress', title: 'Compact current chat',
+            detail: state.generating
+              ? 'Available after generation finishes'
+              : 'Continue in a fresh Arena session with a summary',
+            keywords: 'compact context summary fresh session long conversation',
+            disabled: Boolean(state.generating), run: () => confirmCompact()
+          },
+          {
+            key: 'action:export-md', icon: 'download', title: 'Export current chat as Markdown',
+            detail: state.activeChatTitle || 'Current chat', keywords: 'download export markdown md save',
+            run: () => exportChatMd('md')
+          },
+          {
+            key: 'action:export-html', icon: 'download', title: 'Export current chat as HTML',
+            detail: state.activeChatTitle || 'Current chat', keywords: 'download export html styled web page save',
+            run: () => exportChatMd('html')
+          }
+        );
+      }
+      return actions;
+    };
+
+    const paletteScore = (item, normalizedQuery) => {
+      if (!normalizedQuery) return 0;
+      const title = String(item.title || '').toLowerCase();
+      const searchable = `${item.title || ''} ${item.detail || ''} ${item.keywords || ''}`.toLowerCase();
+      if (title.startsWith(normalizedQuery)) return 0;
+      if (title.includes(normalizedQuery)) return 1;
+      const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
+      return tokens.every((token) => searchable.includes(token)) ? 2 : null;
+    };
+
+    const filtered = (items, normalizedQuery, limit) => items
+      .map((item, index) => ({ item, index, score: paletteScore(item, normalizedQuery) }))
+      .filter((entry) => entry.score !== null)
+      .sort((a, b) => a.score - b.score || a.index - b.index)
+      .slice(0, limit)
+      .map((entry) => entry.item);
+
+    const collectGroups = () => {
+      const normalizedQuery = query.trim().toLowerCase();
+      const actions = filtered(paletteActions(), normalizedQuery, normalizedQuery ? 12 : 20);
+      const chats = filtered((state.chats || []).map((chat) => {
+        const detail = [
+          chat.mode ? modeMeta(chat.mode).label : '',
+          chat.modality ? modalityMeta(chat.modality).label : '',
+          relativeTime(chat.updated_at || chat.created_at)
+        ].filter(Boolean).join(' · ');
+        return {
+          key: `chat:${chat.id}`, icon: 'message', title: chat.title || 'New chat', detail,
+          keywords: `chat conversation ${chat.mode || ''} ${chat.modality || ''}`,
+          run: () => openChat(chat.id)
+        };
+      }), normalizedQuery, normalizedQuery ? 10 : 8);
+      const hits = remoteHits.slice(0, 12).map((hit, index) => ({
+        key: `hit:${hit.chat_id}:${hit.msg_index}:${index}`, icon: 'search',
+        title: hit.title || 'Chat', detail: hit.snippet || 'Matching message',
+        keywords: `${hit.role || ''} search result message`,
+        run: () => openChatAtMessage(hit.chat_id, hit.msg_index)
+      }));
+      return [
+        { label: 'Actions', items: actions },
+        { label: normalizedQuery ? 'Chats' : 'Recent chats', items: chats },
+        { label: 'Search results', items: hits }
+      ].filter((group) => group.items.length);
+    };
+
+    const syncActiveDom = (scroll = false) => {
+      $$('.command-palette-item', results).forEach((button) => {
+        const active = button.dataset.paletteKey === activeKey;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-selected', String(active));
+        if (active) {
+          input.setAttribute('aria-activedescendant', button.id);
+          if (scroll) button.scrollIntoView({ block: 'nearest' });
+        }
+      });
+      if (!renderedItems.some((item) => item.key === activeKey)) input.removeAttribute('aria-activedescendant');
+    };
+
+    const runItem = (item) => {
+      if (!item || item.disabled || closed) return;
+      closed = true;
+      handle?.close();
+      window.setTimeout(() => {
+        Promise.resolve().then(() => item.run()).catch((error) => {
+          toast(errorMessage(error), 'error', 'Command failed');
+        });
+      }, 0);
+    };
+
+    const render = () => {
+      const groups = collectGroups();
+      renderedItems = groups.flatMap((group) => group.items);
+      if (!renderedItems.some((item) => item.key === activeKey && !item.disabled)) {
+        activeKey = renderedItems.find((item) => !item.disabled)?.key || '';
+      }
+      clear(results);
+      let optionIndex = 0;
+      groups.forEach((group) => {
+        results.appendChild(el('div', { class: 'command-palette-group', text: group.label }));
+        group.items.forEach((item) => {
+          const button = el('button', {
+            class: 'command-palette-item', type: 'button', role: 'option',
+            id: `command-palette-option-${optionIndex++}`,
+            'data-palette-key': item.key, disabled: Boolean(item.disabled),
+            'aria-selected': 'false'
+          }, iconEl(item.icon || 'message'),
+          el('span', { class: 'command-palette-item-copy' },
+            el('span', { class: 'command-palette-item-title', text: item.title }),
+            item.detail ? el('span', { class: 'command-palette-item-detail', text: item.detail }) : null));
+          button.addEventListener('mouseenter', () => {
+            if (item.disabled || activeKey === item.key) return;
+            activeKey = item.key;
+            syncActiveDom();
+          });
+          button.addEventListener('click', () => runItem(item));
+          results.appendChild(button);
+        });
+      });
+      if (!renderedItems.length) {
+        results.appendChild(el('div', { class: 'command-palette-empty', text: 'No commands or chats match.' }));
+      }
+      syncActiveDom();
+      const trimmed = query.trim();
+      status.textContent = searching
+        ? 'Searching message text…'
+        : trimmed.length === 1
+          ? 'Type at least 2 characters to search message text.'
+          : `${renderedItems.length} result${renderedItems.length === 1 ? '' : 's'}`;
+    };
+
+    const move = (delta) => {
+      const enabled = renderedItems.filter((item) => !item.disabled);
+      if (!enabled.length) return;
+      const current = enabled.findIndex((item) => item.key === activeKey);
+      const next = current < 0 ? 0 : (current + delta + enabled.length) % enabled.length;
+      activeKey = enabled[next].key;
+      syncActiveDom(true);
+    };
+
+    input.addEventListener('input', () => {
+      query = input.value;
+      activeKey = '';
+      window.clearTimeout(searchTimer);
+      const trimmed = query.trim();
+      if (trimmed.length < 2) {
+        requestSequence += 1;
+        remoteHits = [];
+        searching = false;
+        render();
+        return;
+      }
+      searching = true;
+      render();
+      const sequence = ++requestSequence;
+      searchTimer = window.setTimeout(async () => {
+        try {
+          const hits = await API.searchChats(trimmed);
+          if (sequence === requestSequence && input.value.trim() === trimmed) {
+            remoteHits = Array.isArray(hits) ? hits : [];
+          }
+        } catch { /* title and command filtering still works offline */ }
+        if (sequence === requestSequence && !closed) {
+          searching = false;
+          render();
+        }
+      }, 240);
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowDown') { event.preventDefault(); move(1); }
+      else if (event.key === 'ArrowUp') { event.preventDefault(); move(-1); }
+      else if (event.key === 'Enter') {
+        event.preventDefault();
+        runItem(renderedItems.find((item) => item.key === activeKey));
+      }
+    });
+    results.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      event.preventDefault();
+      input.focus();
+      move(event.key === 'ArrowDown' ? 1 : -1);
+    });
+
+    render();
+    handle = mountModal({
+      title: 'Command palette', subtitle: 'Jump to a chat or run an action', content,
+      onClose: () => {
+        closed = true;
+        window.clearTimeout(searchTimer);
+        requestSequence += 1;
+      }
+    });
+    return handle;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -7973,7 +9017,7 @@ You can start with a more structured option: one script, short captions, and a c
       shortcutRow("Open this window", ['F1']),
       shortcutRow("Send message", ['Enter']),
       shortcutRow("New line", ['Shift', 'Enter']),
-      shortcutRow("Search in loaded chats", ['Ctrl', 'K']),
+      shortcutRow("Open the command palette", ['Ctrl', 'K']),
       shortcutRow("Focus in input field", ['Ctrl', '/']),
       shortcutRow("Close menu or window", ['Esc'])
     );
@@ -8887,6 +9931,16 @@ You can start with a more structured option: one script, short captions, and a c
         el('span', { text: 'Continue on another account at daily limit' }),
         el('span', { class: 'switch' }, failoverToggle, el('span', { class: 'switch-track', 'aria-hidden': 'true' }))));
       wrap.appendChild(el('p', { class: 'setting-desc', text: 'Failover is off by default on purpose: rotating accounts around a daily cap is a fair-use grey zone, and accounts on the same IP may share one limit anyway. See the Usage tab for your send log.' }));
+      const multiSessionToggle = el('input', { type: 'checkbox', class: 'switch-input', checked: cfg.multi_session_subagents === true, 'aria-label': 'Distribute sub-agents across saved accounts' });
+      multiSessionToggle.addEventListener('change', async () => {
+        await API.saveSettings({ multi_session_subagents: multiSessionToggle.checked });
+        state.appSettings = { ...(state.appSettings || {}), multi_session_subagents: multiSessionToggle.checked };
+        if (multiSessionToggle.checked) toast('New sub-agent and fan-out child chats can now be leased to the least-busy saved account. The open chat and Arena Agent stay on the current account; existing Arena conversations never move. This does not raise Arena limits, and accounts on the same IP may share a limit anyway.', 'info', 'Account sessions');
+      });
+      wrap.appendChild(el('label', { class: 'setting-toggle-row' },
+        el('span', { text: 'Distribute sub-agents across saved accounts' }),
+        el('span', { class: 'switch' }, multiSessionToggle, el('span', { class: 'switch-track', 'aria-hidden': 'true' }))));
+      wrap.appendChild(el('p', { class: 'setting-desc', text: 'Off by default. This only schedules new background child chats; it does not switch the account you are looking at and does not rotate accounts after a daily-limit response. Multi-account use can conflict with Arena fair-use expectations — leave it off unless these are accounts you intentionally use this way.' }));
       const trayToggle = el('input', { type: 'checkbox', class: 'switch-input', checked: Boolean(cfg.tray_enabled), 'aria-label': 'Keep in system tray when closed' });
       trayToggle.addEventListener('change', async () => {
         await API.saveSettings({ tray_enabled: trayToggle.checked });
@@ -9031,6 +10085,263 @@ You can start with a more structured option: one script, short captions, and a c
     state.workspaceExpanded = new Set();
     state.workspaceLoadingPaths = new Set();
     state.workspaceRequest += 1;
+    state.gitStatus = null;
+    state.gitError = null;
+    state.gitSelected = new Set();
+    state.gitDiff = null;
+    state.gitRequest += 1;
+  }
+
+  function gitFileLabel(file) {
+    if (file?.conflict) return 'Conflict';
+    if (file?.untracked) return 'Untracked';
+    if (file?.staged && file?.unstaged) return 'Staged + modified';
+    if (file?.staged) return 'Staged';
+    if (file?.unstaged) return 'Modified';
+    return 'Changed';
+  }
+
+  function applyGitPayload(payload) {
+    if (!payload || payload.ok === false || payload.available === false) {
+      state.gitStatus = null;
+      state.gitError = payload?.error || 'Git is unavailable for this Workspace.';
+    } else {
+      state.gitStatus = payload;
+      state.gitError = null;
+      const paths = new Set((payload.files || []).map((item) => String(item.path)));
+      state.gitSelected = new Set([...state.gitSelected].filter((path) => paths.has(path)));
+      if (state.gitDiff && !paths.has(String(state.gitDiff.path))) state.gitDiff = null;
+    }
+    renderGitPanel();
+  }
+
+  async function loadGitStatus({ silent = false } = {}) {
+    const requestId = ++state.gitRequest;
+    state.gitLoading = true;
+    renderGitPanel();
+    try {
+      const payload = await API.getGitStatus();
+      if (requestId === state.gitRequest) applyGitPayload(payload);
+      return payload;
+    } catch (error) {
+      if (requestId === state.gitRequest) {
+        state.gitStatus = null;
+        state.gitError = errorMessage(error);
+        renderGitPanel();
+      }
+      if (!silent) toast(errorMessage(error), 'error', 'Git status unavailable');
+      return null;
+    } finally {
+      if (requestId === state.gitRequest) {
+        state.gitLoading = false;
+        renderGitPanel();
+      }
+    }
+  }
+
+  async function runGitAction(task, successText = '') {
+    if (state.gitBusy) return;
+    state.gitBusy = true;
+    renderGitPanel();
+    try {
+      const payload = await task();
+      applyGitPayload(payload);
+      if (successText) toast(successText, 'success', 'Git');
+      void loadWorkspaceTree('.', { force: true });
+    } catch (error) {
+      toast(errorMessage(error), 'error', 'Git action failed');
+    } finally {
+      state.gitBusy = false;
+      renderGitPanel();
+    }
+  }
+
+  async function loadGitDiff(path, staged = false) {
+    if (state.gitBusy) return;
+    state.gitDiff = { path, staged, loading: true, diff: '', truncated: false, untracked: false };
+    renderGitPanel();
+    try {
+      const payload = await API.getGitDiff(path, staged);
+      state.gitDiff = { ...payload, loading: false };
+    } catch (error) {
+      state.gitDiff = { path, staged, loading: false, diff: '', error: errorMessage(error) };
+    }
+    renderGitPanel();
+  }
+
+  function setWorkspaceTab(tab) {
+    state.workspaceTab = tab === 'git' ? 'git' : 'files';
+    const isGit = state.workspaceTab === 'git';
+    if (els.workspaceFilesPane) els.workspaceFilesPane.hidden = isGit;
+    if (els.workspaceGitPane) els.workspaceGitPane.hidden = !isGit;
+    if (els.workspaceFilesTab) {
+      els.workspaceFilesTab.classList.toggle('is-active', !isGit);
+      els.workspaceFilesTab.setAttribute('aria-selected', String(!isGit));
+    }
+    if (els.workspaceGitTab) {
+      els.workspaceGitTab.classList.toggle('is-active', isGit);
+      els.workspaceGitTab.setAttribute('aria-selected', String(isGit));
+    }
+    if (isGit) {
+      renderGitPanel();
+      if (!state.gitStatus && !state.gitLoading) void loadGitStatus({ silent: true });
+    } else {
+      renderWorkspaceTreePanel();
+    }
+  }
+
+  function renderGitPanel() {
+    const node = els.workspaceGit;
+    const status = state.gitStatus;
+    const count = status?.files?.length || 0;
+    if (els.workspaceGitBadge) {
+      els.workspaceGitBadge.hidden = !count;
+      els.workspaceGitBadge.textContent = String(count);
+    }
+    if (!node) return;
+    clear(node);
+    node.setAttribute('aria-busy', String(state.gitLoading || state.gitBusy));
+
+    const head = el('div', { class: 'git-head' },
+      el('div', { class: 'git-branch' }, iconEl('git-branch'),
+        el('span', { text: status?.branch || 'Git', title: status?.root || '' })),
+      el('button', {
+        class: 'icon-button tiny', type: 'button', disabled: Boolean(state.gitLoading || state.gitBusy),
+        title: 'Refresh Git status', 'aria-label': 'Refresh Git status',
+        onclick: () => { void loadGitStatus(); }
+      }, iconEl('refresh')));
+    node.appendChild(head);
+
+    if (state.gitLoading && !status) {
+      node.appendChild(el('div', { class: 'git-empty' }, el('span', { class: 'mini-spinner' }), el('span', { text: 'Reading repository…' })));
+      return;
+    }
+    if (!status) {
+      node.appendChild(el('div', { class: 'git-empty is-error', text: state.gitError || 'Git status has not been loaded yet.' }));
+      node.appendChild(el('button', { class: 'button button-small button-quiet', type: 'button', onclick: () => { void loadGitStatus(); } },
+        iconEl('refresh'), el('span', { text: 'Try again' })));
+      return;
+    }
+
+    const summary = `${status.staged_count || 0} staged · ${status.unstaged_count || 0} modified · ${status.untracked_count || 0} untracked`;
+    node.appendChild(el('p', { class: 'git-summary', text: status.clean ? 'Working tree clean.' : summary }));
+    if ((status.unstaged_count || 0) + (status.untracked_count || 0) > 0) {
+      const stageAll = el('button', { class: 'button button-small button-quiet git-stage-all', type: 'button', disabled: Boolean(state.gitBusy) },
+        iconEl('plus'), el('span', { text: 'Stage all changes' }));
+      stageAll.addEventListener('click', () => { void runGitAction(() => API.gitStage({ all: true }), 'All changes staged.'); });
+      node.appendChild(stageAll);
+    }
+
+    const list = el('div', { class: 'git-file-list' });
+    (status.files || []).forEach((file) => {
+      const row = el('div', { class: `git-file${file.conflict ? ' is-conflict' : ''}` });
+      const checkbox = el('input', {
+        class: 'git-file-check', type: 'checkbox', checked: state.gitSelected.has(String(file.path)),
+        'aria-label': `Select ${file.path}`
+      });
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) state.gitSelected.add(String(file.path));
+        else state.gitSelected.delete(String(file.path));
+        renderGitPanel();
+      });
+      const main = el('button', {
+        class: 'git-file-main', type: 'button', title: file.orig_path ? `${file.orig_path} → ${file.path}` : file.path,
+        disabled: Boolean(state.gitBusy)
+      }, el('span', { class: 'git-file-path', text: file.path }),
+      el('span', { class: `git-file-state${file.staged ? ' is-staged' : ''}${file.untracked ? ' is-untracked' : ''}`,
+        text: `${gitFileLabel(file)} · ${file.index_status || ' '}${file.worktree_status || ' '}`.trim() }));
+      main.addEventListener('click', () => { void loadGitDiff(file.path, Boolean(file.staged && !file.unstaged)); });
+      row.append(checkbox, main);
+      const actions = el('span', { class: 'git-file-actions' });
+      if (file.unstaged || file.untracked) {
+        const stage = el('button', { class: 'button button-small button-quiet', type: 'button', disabled: Boolean(state.gitBusy) }, el('span', { text: 'Stage' }));
+        stage.addEventListener('click', () => { void runGitAction(() => API.gitStage({ paths: [file.path] }), 'Change staged.'); });
+        actions.appendChild(stage);
+      }
+      if (file.staged) {
+        const unstage = el('button', { class: 'button button-small button-quiet', type: 'button', disabled: Boolean(state.gitBusy) }, el('span', { text: 'Unstage' }));
+        unstage.addEventListener('click', () => { void runGitAction(() => API.gitUnstage([file.path]), 'Change unstaged.'); });
+        actions.appendChild(unstage);
+      }
+      row.appendChild(actions);
+      list.appendChild(row);
+    });
+    if ((status.files || []).length) node.appendChild(list);
+
+    const selected = [...state.gitSelected];
+    if (selected.length) {
+      const selectedBar = el('div', { class: 'git-selected-bar' },
+        el('span', { text: `${selected.length} selected` }));
+      const stageSelected = el('button', { class: 'button button-small', type: 'button', disabled: Boolean(state.gitBusy) }, el('span', { text: 'Stage selected' }));
+      stageSelected.addEventListener('click', () => { void runGitAction(() => API.gitStage({ paths: selected }), 'Selected changes staged.'); });
+      const unstageSelected = el('button', { class: 'button button-small button-quiet', type: 'button', disabled: Boolean(state.gitBusy) }, el('span', { text: 'Unstage' }));
+      unstageSelected.addEventListener('click', () => { void runGitAction(() => API.gitUnstage(selected), 'Selected changes unstaged.'); });
+      selectedBar.append(stageSelected, unstageSelected);
+      node.appendChild(selectedBar);
+    }
+
+    if (state.gitDiff) {
+      const diff = state.gitDiff;
+      const diffBox = el('section', { class: 'git-diff', 'aria-label': `Diff for ${diff.path}` });
+      const diffHead = el('div', { class: 'git-diff-head' },
+        el('span', { class: 'git-diff-path', text: diff.path, title: diff.path }),
+        el('button', { class: 'icon-button tiny', type: 'button', title: 'Close diff', 'aria-label': 'Close diff',
+          onclick: () => { state.gitDiff = null; renderGitPanel(); } }, iconEl('x')));
+      const file = (status.files || []).find((item) => String(item.path) === String(diff.path));
+      if (file?.staged && file?.unstaged) {
+        const toggle = el('div', { class: 'git-diff-toggle' },
+          el('button', { class: `button button-small ${diff.staged ? 'button-quiet' : ''}`, type: 'button', onclick: () => { void loadGitDiff(diff.path, false); } }, el('span', { text: 'Working tree' })),
+          el('button', { class: `button button-small ${diff.staged ? '' : 'button-quiet'}`, type: 'button', onclick: () => { void loadGitDiff(diff.path, true); } }, el('span', { text: 'Staged' })));
+        diffHead.appendChild(toggle);
+      }
+      diffBox.appendChild(diffHead);
+      if (diff.loading) diffBox.appendChild(el('div', { class: 'git-empty' }, el('span', { class: 'mini-spinner' }), el('span', { text: 'Loading diff…' })));
+      else if (diff.error) diffBox.appendChild(el('div', { class: 'git-empty is-error', text: diff.error }));
+      else if (diff.untracked) diffBox.appendChild(el('div', { class: 'git-empty', text: diff.message || 'Untracked file.' }));
+      else diffBox.appendChild(el('pre', { class: 'git-diff-code', text: diff.diff || 'No textual diff (binary file or mode-only change).' }));
+      if (diff.truncated) diffBox.appendChild(el('p', { class: 'git-note', text: 'Diff truncated at 200 KB.' }));
+      node.appendChild(diffBox);
+    }
+
+    const commitBox = el('section', { class: 'git-commit', 'aria-label': 'Create a Git commit' });
+    const message = el('textarea', {
+      class: 'input git-commit-message', rows: '3', maxlength: '5000',
+      placeholder: 'Commit message…', 'aria-label': 'Commit message', value: state.gitCommitMessage || ''
+    });
+    message.addEventListener('input', () => {
+      state.gitCommitMessage = message.value;
+      const button = commitBox.querySelector('[data-git-commit]');
+      if (button) button.disabled = Boolean(state.gitBusy || !(status.staged_count || 0) || !message.value.trim());
+    });
+    const commit = el('button', {
+      class: 'button button-small', type: 'button', 'data-git-commit': '',
+      disabled: Boolean(state.gitBusy || !(status.staged_count || 0) || !(state.gitCommitMessage || '').trim())
+    }, iconEl('check'), el('span', { text: status.staged_count ? `Commit ${status.staged_count} staged` : 'Commit' }));
+    commit.addEventListener('click', () => {
+      const text = message.value.trim();
+      if (!text) return;
+      void runGitAction(async () => {
+        const payload = await API.gitCommit(text);
+        state.gitCommitMessage = '';
+        state.gitSelected.clear();
+        return payload;
+      }, 'Commit created.');
+    });
+    commitBox.append(message, el('div', { class: 'git-commit-foot' },
+      el('span', { class: 'git-note', text: 'Uses this repository’s Git identity and hooks. No push is performed.' }), commit));
+    node.appendChild(commitBox);
+
+    if ((status.recent_commits || []).length) {
+      const history = el('section', { class: 'git-history', 'aria-label': 'Recent commits' },
+        el('h3', { text: 'Recent commits' }));
+      status.recent_commits.forEach((item) => {
+        history.appendChild(el('div', { class: 'git-commit-row' },
+          el('code', { text: item.short_hash || '' }),
+          el('span', { class: 'git-commit-subject', text: item.subject || '', title: item.subject || '' }),
+          el('span', { class: 'git-commit-time', text: item.relative_time || '' })));
+      });
+      node.appendChild(history);
+    }
   }
 
   function syncWorkspacePanelVisibility() {
@@ -9053,7 +10364,7 @@ You can start with a more structured option: one script, short captions, and a c
       try { localStorage.setItem('arenaPersonal.workspacePanelOpen.v4', state.workspacePanelOpen ? '1' : '0'); } catch { /* storage unavailable */ }
     }
     if (!state.workspacePanelOpen) return;
-    renderWorkspaceTreePanel();
+    setWorkspaceTab(state.workspaceTab);
     renderConnectorsPanel();
     if (load) void refreshWorkspacePanel();
     if (focusConnectors) {
@@ -9136,6 +10447,13 @@ You can start with a more structured option: one script, short captions, and a c
   async function loadLayoutSettings() {
     try {
       const payload = await API.getSettings();
+      if (payload && typeof payload === 'object') {
+        // maybeWarmGateway/maybeGatewaySetupPrompt read the gateway opt-ins
+        // from state.appSettings. It used to be filled only when a Settings
+        // toggle changed (or the About tab hydrated), so in a fresh app run
+        // the gateway silently never auto-started even with both opt-ins on.
+        state.appSettings = payload;
+      }
       const layout = payload?.settings?.layout || payload?.layout;
       if (layout && typeof layout === 'object') {
         state.layout = { ...state.layout, ...layout };
@@ -9146,6 +10464,7 @@ You can start with a more structured option: one script, short captions, and a c
         state.arenaConnectorsOff = new Set(off.map(String));
         refreshConnectorSurfaces();
       }
+      maybeWarmGateway();
     } catch { /* cached layout remains active */ }
   }
 
@@ -9232,6 +10551,7 @@ You can start with a more structured option: one script, short captions, and a c
     if (force || !state.connectors) jobs.push(loadConnectors({ reload: force, silent: true }));
     if (state.authenticated && (force || !state.arenaConnectors)) jobs.push(loadArenaConnectors({ silent: true }));
     if (state.workspacePanelOpen && (force || !state.workspaceTreeLoaded)) jobs.push(loadWorkspaceTree('.', { force }));
+    if (state.workspacePanelOpen && !state.gitLoading && (force || !state.gitStatus)) jobs.push(loadGitStatus({ silent: true }));
     await Promise.allSettled(jobs);
   }
 
@@ -10287,6 +11607,8 @@ You can start with a more structured option: one script, short captions, and a c
     els.contextModality = $('#contextModality');
     els.contextModel = $('#contextModel');
     els.contextPending = $('#contextPending');
+    els.heavySendBadge = $('#heavySendBadge');
+    els.heavySendLabel = $('#heavySendLabel');
     els.workspaceButton = $('#workspaceButton');
     els.workspaceLabel = $('#workspaceLabel');
     els.modeButton = $('#modeButton');
@@ -10312,6 +11634,12 @@ You can start with a more structured option: one script, short captions, and a c
     els.workspacePanelRoot = $('#workspacePanelRoot');
     els.workspacePanelClose = $('#workspacePanelClose');
     els.workspaceTree = $('#workspaceTree');
+    els.workspaceFilesPane = $('#workspaceFilesPane');
+    els.workspaceGitPane = $('#workspaceGitPane');
+    els.workspaceGit = $('#workspaceGit');
+    els.workspaceFilesTab = $('#workspaceFilesTab');
+    els.workspaceGitTab = $('#workspaceGitTab');
+    els.workspaceGitBadge = $('#workspaceGitBadge');
     els.workspaceOpenButton = $('#workspaceOpenButton');
     els.workspaceRefreshButton = $('#workspaceRefreshButton');
     els.connectorsPane = $('#connectorsPane');
@@ -10383,6 +11711,10 @@ You can start with a more structured option: one script, short captions, and a c
     });
     document.addEventListener('pointerdown', primeDoneAudio);
     document.addEventListener('keydown', primeDoneAudio);
+    document.addEventListener('selectionchange', () => { window.setTimeout(flushDeferredChatRender, 60); });
+    els.messageList?.addEventListener('focusout', () => { window.setTimeout(flushDeferredChatRender, 60); });
+    els.messageList?.addEventListener('pause', () => { window.setTimeout(flushDeferredChatRender, 60); }, true);
+    els.messageList?.addEventListener('ended', () => { window.setTimeout(flushDeferredChatRender, 60); }, true);
     document.addEventListener('keydown', (event) => {
       if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey
         && event.key.toLowerCase() === 'f' && state.view === 'chat') {
@@ -10484,8 +11816,13 @@ You can start with a more structured option: one script, short captions, and a c
     els.workspaceOpenButton?.addEventListener('click', () => { void openWorkspaceFolder(state.workspacePanelRoot || state.workspace); });
     els.workspaceRefreshButton?.addEventListener('click', async () => {
       els.workspaceRefreshButton.classList.add('is-spinning');
-      try { await loadWorkspaceTree('.', { force: true }); }
-      finally { els.workspaceRefreshButton.classList.remove('is-spinning'); }
+      try {
+        if (state.workspaceTab === 'git') await loadGitStatus();
+        else await loadWorkspaceTree('.', { force: true });
+      } finally { els.workspaceRefreshButton.classList.remove('is-spinning'); }
+    });
+    [els.workspaceFilesTab, els.workspaceGitTab].forEach((button) => {
+      button?.addEventListener('click', () => setWorkspaceTab(button.dataset.workspaceTab));
     });
     els.addConnectorButton?.addEventListener('click', () => openAddConnectorModal());
     els.openMcpJsonButton?.addEventListener('click', async () => {
@@ -10515,6 +11852,7 @@ You can start with a more structured option: one script, short captions, and a c
     });
     els.workspaceSyncToggle?.addEventListener('change', () => setWorkspaceSync(els.workspaceSyncToggle.checked));
     els.compactButton?.addEventListener('click', confirmCompact);
+    els.heavySendBadge?.addEventListener('click', () => openSettings('usage'));
     els.gatewayChip?.addEventListener('click', () => openSettings('gateway'));
     els.sendButton?.setAttribute('type', 'submit');
     els.stopButton?.addEventListener('click', () => { void stopGeneration(); });
@@ -10525,7 +11863,7 @@ You can start with a more structured option: one script, short captions, and a c
       if (!els.attachButton.disabled) openAttachMenu();
     });
     els.fileInput?.addEventListener('change', () => {
-      addFiles(els.fileInput.files);
+      addFiles(els.fileInput.files, 'picker');
       els.fileInput.value = '';
       focusComposer();
     });
@@ -10533,7 +11871,7 @@ You can start with a more structured option: one script, short captions, and a c
       const files = event.clipboardData?.files;
       if (files && files.length) {
         event.preventDefault();
-        addFiles(files);
+        addFiles(files, 'paste');
       }
     });
     const dropCard = els.composerCard;
@@ -10561,7 +11899,7 @@ You can start with a more structured option: one script, short captions, and a c
         hideOverlay();
         const workspacePath = event.dataTransfer?.getData('application/x-arena-workspace-path');
         if (workspacePath) { void attachWorkspaceFile(workspacePath); return; }
-        addFiles(event.dataTransfer?.files);
+        addFiles(event.dataTransfer?.files, 'drop');
       });
     }
     window.addEventListener('dragover', (event) => event.preventDefault());
@@ -10793,11 +12131,7 @@ You can start with a more structured option: one script, short captions, and a c
     const key = event.key.toLowerCase();
     if (key === 'k') {
       event.preventDefault();
-      setChatSearchVisible(true);
-      if (els.recentsToggle.getAttribute('aria-expanded') === 'false') {
-        els.recentsToggle.setAttribute('aria-expanded', 'true');
-        els.recentsBody.hidden = false;
-      }
+      openCommandPalette();
     } else if (key === 'n') {
       event.preventDefault();
       void createNewChat();
@@ -10879,6 +12213,12 @@ You can start with a more structured option: one script, short captions, and a c
       state.phase = state.serverError ? 'offline' : 'ready';
       ensureBypassWarning();
       updateAllUI();
+      applyInitialDeepLink();
+      if (pendingDeepLink) {
+        const link = pendingDeepLink;
+        pendingDeepLink = null;
+        void applyDeepLink(link);
+      }
       if (!state.demo) {
         document.documentElement.classList.remove('demo-mode');
       }

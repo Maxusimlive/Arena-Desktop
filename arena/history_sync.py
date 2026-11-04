@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from arena.native_agent import media_choice_from_output, normalize_tool_name, tool_display_name
+
 _WIRE_TO_UI_MODE = {
     "battle": "battle",
     "side-by-side": "side-by-side",
@@ -162,6 +164,70 @@ def agentic_last_event_id(session: Any) -> Optional[str]:
     return None
 
 
+def _media_tools_from_parts(parts: Any, known_inputs: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Rebuild completed image/voice choices from an AI SDK message.
+
+    Arena's stored agentic messages can expose a media tool either as a
+    ``tool-*``/``tool-invocation`` assistant part or as the following user's
+    ``data-tool-results`` part.  Only settled choices are imported: a remote
+    snapshot has no live desktop broker that could answer a pending card.
+    """
+    if not isinstance(parts, list):
+        return []
+    invocations: List[Dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "data-tool-results" and isinstance(part.get("data"), list):
+            invocations.extend(item for item in part["data"] if isinstance(item, dict))
+            continue
+        invocation = part.get("toolInvocation") if isinstance(part.get("toolInvocation"), dict) else part
+        invocations.append(invocation)
+
+    inputs_by_id: Dict[str, Any] = dict(known_inputs or {})
+    tools: List[Dict[str, Any]] = []
+    for invocation in invocations:
+        part_type = str(invocation.get("type") or "")
+        raw_tool = invocation.get("toolName") or invocation.get("tool") or invocation.get("name")
+        if not raw_tool and part_type.startswith("tool-") and part_type != "tool-invocation":
+            raw_tool = part_type[5:]
+        tool = normalize_tool_name(raw_tool)
+        if tool not in ("generate_image", "add_voice"):
+            continue
+        call_id = invocation.get("toolCallId") or invocation.get("tool_call_id") or invocation.get("id")
+        tool_input = invocation.get("input") or invocation.get("args") or invocation.get("arguments")
+        if not isinstance(tool_input, dict) and call_id:
+            tool_input = inputs_by_id.get(str(call_id))
+        if call_id and isinstance(tool_input, dict):
+            inputs_by_id[str(call_id)] = tool_input
+            if known_inputs is not None:
+                known_inputs[str(call_id)] = tool_input
+        output = invocation.get("output") or invocation.get("result")
+        choice = media_choice_from_output(output, tool_input, tool=tool)
+        if not choice:
+            continue
+        status = str(choice.get("status") or "").lower()
+        if status == "aborted":
+            choice["status"] = "cancelled"
+            status = "cancelled"
+        if choice.get("selected_index") is None and status not in ("completed", "error", "cancelled"):
+            continue
+        call_id = invocation.get("toolCallId") or invocation.get("tool_call_id") or invocation.get("id")
+        if call_id:
+            choice["tool_call_id"] = str(call_id)
+        detail = choice.get("text") if tool == "add_voice" else choice.get("prompt")
+        summary = tool_display_name(tool) + (f": {str(detail)[:160]}" if detail else "")
+        tools.append({
+            "tool": tool,
+            "summary": summary,
+            "tool_call_id": str(call_id) if call_id else None,
+            "status": "error" if status == "error" else "ok",
+            "ok": status != "error",
+            "media_choice": choice,
+        })
+    return tools
+
+
 def agentic_messages(session: Any) -> List[Dict[str, Any]]:
     """Best-effort local messages for one cloud Arena Agent (agentic) session.
 
@@ -177,6 +243,8 @@ def agentic_messages(session: Any) -> List[Dict[str, Any]]:
     indexed = list(enumerate(raw_messages))
     indexed.sort(key=lambda pair: (str((pair[1] or {}).get("createdAt") or "") if isinstance(pair[1], dict) else "", pair[0]))
     messages: List[Dict[str, Any]] = []
+    known_media_inputs: Dict[str, Any] = {}
+    pending_media_turn = False
     for _index, raw in indexed:
         if not isinstance(raw, dict):
             continue
@@ -189,13 +257,42 @@ def agentic_messages(session: Any) -> List[Dict[str, Any]]:
         else:
             text = _content_text(raw.get("content"))
         text = (text or "").strip()
-        if not text:
+        known_before = set(known_media_inputs)
+        media_tools = _media_tools_from_parts(parts, known_media_inputs)
+        if media_tools and role == "user":
+            if pending_media_turn or not messages or messages[-1].get("role") != "assistant":
+                # A pending media invocation is intentionally not imported
+                # on its own.  Its settled user-side result still belongs
+                # to an assistant turn, even when that turn had no text.
+                messages.append({
+                    "role": "assistant", "text": "", "text_b": "",
+                    "names": {"a": "Agent", "b": None}, "tools": [],
+                })
+            pending_media_turn = False
+            existing = messages[-1].setdefault("tools", [])
+            for tool in media_tools:
+                call_id = tool.get("tool_call_id")
+                for position, old in enumerate(existing):
+                    if call_id and old.get("tool_call_id") == call_id:
+                        existing[position] = tool
+                        break
+                else:
+                    existing.append(tool)
+            if not text:
+                continue
+        if not text and not media_tools:
+            if role == "assistant" and set(known_media_inputs) - known_before:
+                pending_media_turn = True
             continue
         if role == "user":
-            messages.append({"role": "user", "text": text})
+            if text:
+                messages.append({"role": "user", "text": text})
         else:
-            messages.append({"role": "assistant", "text": text, "text_b": "",
-                             "names": {"a": "Agent", "b": None}})
+            assistant = {"role": "assistant", "text": text, "text_b": "",
+                         "names": {"a": "Agent", "b": None}}
+            if media_tools:
+                assistant["tools"] = media_tools
+            messages.append(assistant)
     return messages
 
 

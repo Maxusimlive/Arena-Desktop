@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="description" content="Arena Desktop — an unofficial local Windows client for arena.ai. A desktop interface over a local Flask + pywebview backend.">
   <title>Arena Desktop</title>
-  <link rel="stylesheet" href="/static/style.css?v=5.6.1" onerror="this.onerror=null;this.href='static/style.css?v=5.6.1'">
+  <link rel="stylesheet" href="/static/style.css?v=5.7.0" onerror="this.onerror=null;this.href='static/style.css?v=5.7.0'">
 </head>
 <body>
   <a class="skip-link" href="#prompt">Skip to the message box</a>
@@ -222,6 +222,10 @@
             <span class="context-pending" id="contextPending" hidden>
               <span class="mini-spinner" aria-hidden="true"></span> Applying…
             </span>
+            <button class="heavy-send-badge" type="button" id="heavySendBadge" hidden aria-label="Heavy send details">
+              <span data-icon="alert"></span>
+              <span id="heavySendLabel">Heavy send</span>
+            </button>
           </div>
 
           <form class="composer-card" id="composerForm" novalidate>
@@ -317,8 +321,19 @@
             </button>
           </div>
         </header>
-        <section class="workspace-files-pane" aria-label="Workspace file tree">
+        <div class="workspace-tabs" role="tablist" aria-label="Workspace views">
+          <button class="workspace-tab is-active" id="workspaceFilesTab" type="button" role="tab" aria-selected="true" aria-controls="workspaceFilesPane" data-workspace-tab="files">
+            <span data-icon="folder"></span><span>Files</span>
+          </button>
+          <button class="workspace-tab" id="workspaceGitTab" type="button" role="tab" aria-selected="false" aria-controls="workspaceGitPane" data-workspace-tab="git">
+            <span data-icon="git-branch"></span><span>Git</span><span class="workspace-tab-badge" id="workspaceGitBadge" hidden>0</span>
+          </button>
+        </div>
+        <section class="workspace-files-pane" id="workspaceFilesPane" aria-label="Workspace file tree" role="tabpanel" aria-labelledby="workspaceFilesTab">
           <div class="workspace-tree" id="workspaceTree" role="tree" aria-label="Workspace files"></div>
+        </section>
+        <section class="workspace-git-pane" id="workspaceGitPane" aria-label="Workspace Git status" role="tabpanel" aria-labelledby="workspaceGitTab" hidden>
+          <div class="workspace-git" id="workspaceGit"></div>
         </section>
       </section>
 
@@ -391,6 +406,6 @@
     <div class="noscript-message">Arena Desktop needs JavaScript. Enable it in the WebView2 settings.</div>
   </noscript>
 
-  <script src="/static/app.js?v=5.6.1" defer onerror="this.onerror=null;this.src='static/app.js?v=5.6.1'"></script>
+  <script src="/static/app.js?v=5.7.0" defer onerror="this.onerror=null;this.src='static/app.js?v=5.7.0'"></script>
 </body>
 </html>

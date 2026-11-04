@@ -4,6 +4,7 @@ UI, plus a hidden arena.ai window (the engine) that sends chats from arena's
 own page. Sign-in and human checks show it as a pane inside the main window.
 """
 
+import json
 import logging
 import os
 import socket
@@ -434,16 +435,34 @@ def _ensure_webview2() -> None:
 
 
 def main():
+    from arena import deep_links
+
+    deep_link_arg = deep_links.find_deep_link_arg(sys.argv[1:])
+    if deep_link_arg:
+        try:
+            deep_links.parse_deep_link(deep_link_arg)
+        except ValueError:
+            # A malformed custom-protocol invocation should still show the
+            # app, but it must not reach the composer or chat router.
+            deep_link_arg = "arenadesktop://open"
+        if deep_links.forward_deep_link(deep_link_arg):
+            return
+
     import webview
     from arena import contracts
     from arena.config import CONFIG_DIR
     from arena.engine import ENGINE
+    from arena.web import app as web_app
 
     contracts.load_overrides()
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(filename=str(CONFIG_DIR / "desktop.log"), level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("werkzeug").setLevel(logging.WARNING)  # keep the log to what the app does
+    if deep_links.register_protocol():
+        LOG.info("registered arenadesktop:// for this Windows user")
+    instance_token = deep_links.new_instance_token()
+    web_app.INSTANCE_TOKEN = instance_token
     if sys.platform == "win32":
         try:
             import ctypes
@@ -454,6 +473,10 @@ def main():
     port = int(os.environ.get("ARENA_PORT") or 0) or find_free_port()
     threading.Thread(target=start_flask, args=(port,), daemon=True).start()
     wait_port(port)
+    try:
+        deep_links.write_instance(port, instance_token)
+    except Exception:
+        LOG.exception("could not publish the deep-link instance file")
     profile = _flag_value("--profile")
     if profile:
         _switch_profile(port, profile)
@@ -468,8 +491,13 @@ def main():
     background = "--background" in sys.argv
     start_url = f"http://127.0.0.1:{port}/"
     mode_flag = _flag_value("--mode")
+    query = []
     if mode_flag:
-        start_url += "?mode=" + urllib.parse.quote(mode_flag)
+        query.append(("mode", mode_flag))
+    if deep_link_arg:
+        query.append(("deeplink", deep_link_arg))
+    if query:
+        start_url += "?" + urllib.parse.urlencode(query)
     bridge = JsBridge()
     main_win = webview.create_window("Arena Desktop", start_url, width=1280, height=840,
                                      min_size=(860, 600), background_color="#242422", text_select=True,
@@ -483,6 +511,7 @@ def main():
     ENGINE.dock = None
     main_win.events.closed += lambda *a: os._exit(0)
     # Optional tray life: close hides to the tray; Ctrl+Alt+A toggles the window.
+    tray = None
     if cfg.get("tray_enabled") or background:
         tray = Tray(main_win, base / "assets" / "logo.png")
         tray.visible = not background
@@ -490,6 +519,22 @@ def main():
             main_win.events.closing += tray.on_closing
         elif background:
             main_win.show()  # no tray to bring it back from: never start invisible
+
+    def handle_deep_link(payload):
+        try:
+            if tray is not None:
+                tray.show_window()
+            else:
+                main_win.show()
+                main_win.restore()
+            main_win.evaluate_js(
+                "window.__arenaDeepLink && window.__arenaDeepLink(" + json.dumps(payload) + ")")
+            return True
+        except Exception:
+            LOG.exception("deep link window handoff failed")
+            return False
+
+    web_app.DEEP_LINK_HOOK = handle_deep_link
 
     storage = CONFIG_DIR / "webview"
     storage.mkdir(parents=True, exist_ok=True)

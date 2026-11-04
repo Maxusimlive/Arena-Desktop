@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -47,6 +48,17 @@ _version_cache: Dict[str, Any] = {}
 
 def _is_windows() -> bool:
     return sys.platform.startswith("win")
+
+
+def _host_architecture() -> str:
+    raw = (os.environ.get("PROCESSOR_ARCHITECTURE") or platform.machine() or "").lower()
+    if raw in ("arm64", "aarch64"):
+        return "arm64"
+    if raw in ("amd64", "x86_64", "x64"):
+        return "x64"
+    if raw in ("x86", "i386", "i686"):
+        return "x86"
+    return raw or "unknown"
 
 
 def cloudflared_path() -> Optional[Path]:
@@ -97,6 +109,13 @@ def detect() -> List[Dict[str, Any]]:
     python = shutil.which("py") or shutil.which("python")
     webview2 = _webview2_version()
     winget = bool(shutil.which("winget")) if _is_windows() else False
+    host_arch = _host_architecture()
+    cloudflared_note = ("Single file, no administrator rights. Some antivirus tools flag "
+                        "cloudflared because tunnel tools are dual-use; this copy is the "
+                        "official Cloudflare build and its checksum is verified.")
+    if host_arch == "arm64":
+        cloudflared_note += (" Cloudflare does not publish a Windows ARM64 build for this "
+                             "pinned release, so Windows runs this official x64 file by emulation.")
     return [
         {
             "id": "cloudflared", "name": "cloudflared (Cloudflare Tunnel)",
@@ -108,9 +127,9 @@ def detect() -> List[Dict[str, Any]]:
             "install_kind": "download" if _is_windows() else "unsupported",
             "size_mb": round(CLOUDFLARED_SIZE / 1048576),
             "source": "github.com/cloudflare/cloudflared (official release, SHA-256 verified)",
-            "note": "Single file, no administrator rights. Some antivirus tools flag "
-                    "cloudflared because tunnel tools are dual-use; this copy is the "
-                    "official Cloudflare build and its checksum is verified.",
+            "host_architecture": host_arch,
+            "binary_architecture": "x64",
+            "note": cloudflared_note,
         },
         {
             "id": "node", "name": "Node.js",

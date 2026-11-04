@@ -204,6 +204,7 @@ def sync_models(cookie: Optional[str] = None, force: bool = False,
                 user_selectable = (_flag is True or _flag == 1
                                    or (isinstance(_flag, str) and _flag.lower() == "true"))
                 capabilities = m.get("capabilities", {})
+                input_support = model_input_support({"capabilities": capabilities})
 
                 # Tag router model
                 is_router = (m_id == MAX_ROUTER_ID or display_name.lower() == "max" or org == "boss-bandit")
@@ -218,6 +219,8 @@ def sync_models(cookie: Optional[str] = None, force: bool = False,
                     "rank": rank,
                     "user_selectable": user_selectable,
                     "capabilities": capabilities,
+                    "supports_image_input": input_support["image"],
+                    "supports_file_input": input_support["file"],
                     "is_router": is_router,
                     "icon_url": _first_icon_url(m, org if isinstance(org, dict) else None,
                                                 provider if isinstance(provider, dict) else None),
@@ -304,6 +307,77 @@ def _supports_modality(model: Dict[str, Any], modality: str) -> bool:
     return model.get("arena") == target_arena
 
 
+def model_input_support(model: Dict[str, Any]) -> Dict[str, Optional[bool]]:
+    """Return image/file input support as Arena evaluates it.
+
+    Arena's composer checks ``!!inputCapabilities.image`` and
+    ``!!inputCapabilities.file``.  In JavaScript an empty object/array means
+    "supported" (it can carry more specific format limits), so presence is
+    the signal.  The Python-side `_truthy_capability` deliberately treats
+    empty collections as a non-meaningful capability value for output
+    detection; it must not be used for input support.  ``None`` means the
+    catalogue row carried no input capability map at all.
+    """
+    if not isinstance(model, dict):
+        return {"image": None, "file": None}
+    caps = model.get("capabilities")
+    if isinstance(caps, (list, tuple, set)):
+        names = {str(item).strip().lower() for item in caps if str(item).strip()}
+        if names:
+            # A capability/tag list is not an exhaustive input-capability
+            # map (demo and older cached rows use labels such as "Router").
+            # Presence proves support; absence remains unknown rather than
+            # turning into a false attachment ban.
+            return {
+                "image": True if names & {"image", "images", "vision", "image_input", "image-upload"} else None,
+                "file": True if names & {"file", "files", "pdf", "document", "documents", "file_input", "file-upload"} else None,
+            }
+        return {"image": None, "file": None}
+
+    inputs, _outputs = _capability_maps(model)
+    # Normalised rows already carry these booleans.  Treat an explicit False
+    # as authoritative rather than falling back to "unknown".
+    known: Dict[str, Optional[bool]] = {}
+    for kind, field in (("image", "supports_image_input"), ("file", "supports_file_input")):
+        value = model.get(field)
+        known[kind] = bool(value) if value is not None else None
+    if all(value is not None for value in known.values()):
+        return known
+    if not inputs:
+        return known
+
+    def _presence(kind: str, keys: Tuple[str, ...]) -> Optional[bool]:
+        if known[kind] is not None:
+            return known[kind]
+        present_keys = [key for key in keys if key in inputs]
+        if not present_keys:
+            return False
+        for key in present_keys:
+            value = inputs.get(key)
+            if value is None or value is False:
+                continue
+            if isinstance(value, (int, float)) and value == 0:
+                continue
+            if isinstance(value, str) and value.strip().lower() in {"", "false", "no", "none", "unsupported"}:
+                continue
+            return True
+        return False
+
+    return {
+        "image": _presence("image", ("image", "images", "vision", "image_input")),
+        "file": _presence("file", ("file", "files", "pdf", "document", "documents", "file_input")),
+    }
+
+
+def model_can_receive_attachment(model: Dict[str, Any], media_type: str) -> Optional[bool]:
+    """Can this model receive a message attachment of *media_type*?"""
+    media = (media_type or "").split(";", 1)[0].strip().lower()
+    support = model_input_support(model)
+    if media.startswith("image/"):
+        return support["image"]
+    return support["file"]
+
+
 def get_router_model(all_models: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Return live Max Router only when Arena marks it user-selectable."""
     for model in all_models or []:
@@ -319,7 +393,8 @@ def get_router_model(all_models: List[Dict[str, Any]]) -> Optional[Dict[str, Any
     return None
 
 
-def get_auto_agent_model(all_models: List[Dict[str, Any]], preferred_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def get_auto_agent_model(all_models: List[Dict[str, Any]], preferred_id: Optional[str] = None,
+                         required_inputs: Tuple[str, ...] = ()) -> Optional[Dict[str, Any]]:
     """Pick an internal model for Agent without exposing a model choice.
 
     Max/routers are deliberately excluded: Agent must keep working when the
@@ -334,6 +409,19 @@ def get_auto_agent_model(all_models: List[Dict[str, Any]], preferred_id: Optiona
                          or model.get("provider") == "boss-bandit" or model.get("org") == "boss-bandit")
         if model_id and not is_router:
             candidates.append(model)
+    required = tuple(dict.fromkeys(kind for kind in required_inputs if kind in ("image", "file")))
+    if required:
+        explicit = []
+        unknown = []
+        for model in candidates:
+            support = model_input_support(model)
+            if any(support[kind] is False for kind in required):
+                continue
+            if all(support[kind] is True for kind in required):
+                explicit.append(model)
+            else:
+                unknown.append(model)
+        candidates = explicit + unknown
     if preferred_id:
         for model in candidates:
             if str(model.get("id")) == str(preferred_id):

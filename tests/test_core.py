@@ -2717,6 +2717,10 @@ def test_parallel_research_children(web, monkeypatch, tmp_path):
 
 def test_fanout_three_models_and_summary(web, monkeypatch, tmp_path):
     appmod, c, cfg, use, sent, cid, ws = _delegate_parent(web, tmp_path, monkeypatch)
+    catalog = appmod.sync_models()
+    m3 = dict(catalog[-1], id="m3", name="Model Three")
+    monkeypatch.setattr(appmod, "sync_models",
+                        lambda force=False: [dict(m) for m in [*catalog, m3]])
     fresh = "22222222-2222-7222-8222-222222222222"
     use(FakeResp(['a0:"Answer from M1"']), FakeResp(['a0:"Answer from M2"']),
         FakeResp(['a0:"Answer from M3"']), FakeResp(['a0:"They mostly agree"']))
@@ -3191,6 +3195,51 @@ def test_gateway_loopback_jobs_and_pairing():
     finally:
         mgr.stop()
     assert mgr.status()["state"] == "off"
+
+
+def test_gateway_slow_tunnel_probe_does_not_kill_session(tmp_path):
+    """Auto-start waits 20s while the health probe allows 40s of DNS lag:
+    a live cloudflared that already printed its URL must not be killed by
+    the shorter wait (regression: gateway silently never started)."""
+    import os
+    import stat
+    import sys
+
+    if sys.platform.startswith("win"):
+        pytest.skip("fake cloudflared is a POSIX shell script")
+    from arena.gateway import GatewayManager
+
+    fake = tmp_path / "cloudflared"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "echo 'INF |  https://fake-gateway-test.trycloudflare.com  |'\n"
+        "sleep 30\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    mgr = GatewayManager(tool_index=lambda: {},
+                         call_tool=lambda alias, args: "",
+                         approve=lambda s, t, ro, a: True,
+                         cloudflared_path=lambda: fake)
+    try:
+        status = mgr.start(["blender"], wait_seconds=2)
+        assert status["state"] == "on"
+        assert status["url"] == "https://fake-gateway-test.trycloudflare.com"
+        assert mgr.injection_block()  # the agent gets the session block
+    finally:
+        mgr.stop()
+
+    dead = tmp_path / "cloudflared-dead"
+    dead.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    dead.chmod(dead.stat().st_mode | stat.S_IEXEC)
+    mgr2 = GatewayManager(tool_index=lambda: {},
+                          call_tool=lambda alias, args: "",
+                          approve=lambda s, t, ro, a: True,
+                          cloudflared_path=lambda: dead)
+    try:
+        status2 = mgr2.start(["blender"], wait_seconds=2)
+        assert status2["state"] == "off"  # a dead tunnel still fails cleanly
+    finally:
+        mgr2.stop()
+    assert os.path.exists(fake)  # tmp fixture sanity
 
 
 def test_gateway_injection_gating(web, monkeypatch):
@@ -3886,3 +3935,73 @@ def test_gateway_session_key_tracks_tunnel(web, monkeypatch):
     monkeypatch.setattr(appmod, "_gateway", lambda: _Mgr(
         {"state": "on", "url": "https://b.trycloudflare.com", "pairing": "tok2"}))
     assert appmod._gateway_session_key() != k1
+
+
+def test_native_add_voice_choice_sends_stats_without_image_reveal(web, monkeypatch):
+    hash_a, hash_b = "c" * 43, "d" * 43
+    first = _FakeStreamResp(_lines(
+        {"type": "start", "messageId": "assistant-1",
+         "messageMetadata": {"nodeId": "node-voice"}},
+        {"type": "tool-input-available", "toolCallId": "voice1",
+         "toolName": "arena__add_voice",
+         "input": {"text": "Choose the voice for this line.", "language": "en-GB",
+                   "voice_identity": {"gender": "feminine", "use_case": "narration"}}},
+        {"type": "tool-output-available", "toolCallId": "voice1",
+         "output": {"status": "awaiting_user_response", "voice_id": "voice-99",
+                    "candidates": [{"index": 0, "hash": hash_a},
+                                   {"index": 1, "hash": hash_b}]}},
+        {"type": "finish-step"},
+    ))
+    second = _FakeStreamResp(_lines(
+        {"type": "data-image-battle-reveal",
+         "data": {"requestNodeId": "node-voice", "toolCallId": "voice1",
+                  "attribution": [{"index": 0, "model_name": "Not A Voice"}]}},
+        {"type": "text-delta", "delta": "Voice selected."},
+        {"type": "trigger:turn-complete"},
+        start_id=110,
+    ))
+    appmod, c, gen, result, appends = _native_hitl_setup(
+        web, monkeypatch, [first, second])
+
+    choice_event = None
+    for raw in gen:
+        event = _sse_events_from_raw([raw])[0]
+        if event["type"] == "media_choice":
+            choice_event = event
+            break
+    assert choice_event and choice_event["tool"] == "add_voice"
+    public = choice_event["media_choice"]
+    assert public["kind"] == "voice"
+    assert public["text"] == "Choose the voice for this line."
+    assert public["language"] == "en-GB"
+    assert public["voice_identity"] == {"gender": "feminine", "use_case": "narration"}
+    assert [item["url"] for item in public["candidates"]] == [
+        f"/api/native-cas/{hash_a}", f"/api/native-cas/{hash_b}"]
+
+    answered = c.post(f"/api/media-choices/{choice_event['id']}", json={
+        "selected_index": 1,
+        "play_counts": [2, 1],
+        "listen_seconds": [3.25, 1.5],
+    })
+    assert answered.status_code == 200, answered.get_json()
+    assert answered.get_json()["voice_id"] == "voice-99"
+    collected = _sse_events_from_raw(list(gen))
+
+    assert result["text"] == "Voice selected."
+    assert len(appends) == 1
+    output = appends[0][1]["payload"]["message"]["parts"][0]["data"][0]["output"]
+    assert output == {
+        "status": "completed",
+        "candidates": [{"index": 0, "hash": hash_a}, {"index": 1, "hash": hash_b}],
+        "selected_index": 1,
+        "selection_method": "user",
+        "voice_id": "voice-99",
+        "play_counts": [2, 1],
+        "listen_seconds": [3.25, 1.5],
+    }
+    saved_choice = result["tools"][0]["media_choice"]
+    assert saved_choice["voice_id"] == "voice-99"
+    assert saved_choice["play_counts"] == [2, 1]
+    assert saved_choice["listen_seconds"] == [3.25, 1.5]
+    assert all("model_name" not in item for item in saved_choice["candidates"])
+    assert any(event["type"] == "media_choice_done" for event in collected)

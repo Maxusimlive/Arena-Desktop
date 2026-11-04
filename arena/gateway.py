@@ -216,8 +216,21 @@ class GatewayManager:
                 return self.status(include_pairing=True)
         self._ready.wait(max(0.0, wait_seconds))
         if self._state == "starting":
-            self._last_error = "tunnel did not come up in time"
-            self.stop("startup timeout")
+            if self._url and self._tunnel is not None and self._tunnel.poll() is None:
+                # cloudflared is alive and Cloudflare already handed out the
+                # URL; only this machine's own health probe is still waiting
+                # on DNS/edge propagation (it allows itself 40s, while the
+                # auto-start path waits just 20s). Killing the session here
+                # turned slow DNS into a silent "gateway never started" even
+                # though the tunnel was fine — the agent can typically reach
+                # the URL before the local probe succeeds.
+                self._state = "on"
+                self._ready.set()
+                self._touch()
+                self._info("tunnel up (local health probe still pending)")
+            else:
+                self._last_error = "tunnel did not come up in time"
+                self.stop("startup timeout")
         return self.status(include_pairing=True)
 
     def stop(self, reason: str = "stopped") -> Dict[str, Any]:

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.6.1-8b5cf6?style=flat-square" alt="Version 5.6.1" />
+  <img src="https://img.shields.io/badge/version-5.7.0-8b5cf6?style=flat-square" alt="Version 5.7.0" />
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-blue?style=flat-square" alt="Windows 10/11" />
   <img src="https://img.shields.io/badge/python-3.11%2B-3776ab?style=flat-square" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/models-400%2B%20via%20arena.ai-10b981?style=flat-square" alt="400+ models via arena.ai" />
@@ -97,9 +97,17 @@ The app orchestrates chats, tools, files and permissions around it.
   matters. The native Arena Agent's own structured questions work the same way: options and a
   free-text answer appear in the app, the answer returns to the same Arena session, and the
   question and answer stay in the transcript.
-- **Arena Agent image choices** (v5.6): when Arena generates two image options, both open
+- **Arena Agent image and voice choices**: when Arena generates two image options, both open
   full-size in the app; picking one continues the same session. Both images—and, after the
-  choice, both model names—stay visible in the saved chat.
+  choice, both model names—stay visible in the saved chat. Voice auditions play in-app too;
+  the selected voice, its returned voice ID and your play/listen statistics are sent back to
+  the same Arena session and preserved in history.
+- **v5.7 workflow pack**: a Ctrl+K command palette (chats, full-text hits, Compact, exports,
+  models and panels), a Workspace Git tab (status, diff, stage/unstage and local commits),
+  a heavy-send warning for large contexts on premium models, standalone styled HTML chat
+  export beside Markdown, and safe `arenadesktop://` links that can open a chat or prefill
+  a prompt without sending it. Saved cookie files and account sessions are now protected
+  with Windows DPAPI for the current user (older plaintext files migrate on load).
 - **Sub-agents**: the Local Agent (and Direct with Workspace Sync) can delegate a self-contained
   sub-task to a child chat with its own Arena session and tool loop — research (read-only) or work —
   and pick the sub-agent's model. Only the child's summary returns to the parent, so long projects

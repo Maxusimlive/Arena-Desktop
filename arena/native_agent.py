@@ -318,8 +318,28 @@ def _attribution_list(value):
     return attribution
 
 
-def image_choice_from_output(output, tool_input=None):
-    """Normalised pending/completed state for ``generate_image`` output."""
+def _numeric_list(value, integer=False):
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value[:16]:
+        try:
+            number = int(item) if integer else float(item)
+        except (TypeError, ValueError, OverflowError):
+            number = 0
+        result.append(max(0, number))
+    return result
+
+
+def media_choice_from_output(output, tool_input=None, tool="generate_image"):
+    """Normalised pending/completed state for an Arena media-choice tool.
+
+    ``generate_image`` and ``add_voice`` share the candidate/selection
+    envelope.  Voice additionally carries the audition text/language from
+    its input and may report a server-issued ``voice_id`` plus listening
+    statistics.  Values are passed through only when Arena supplied them;
+    no voice identity or attribution is synthesised by the client.
+    """
     if isinstance(output, str):
         output = _json_or_none(output)
     if not isinstance(output, dict):
@@ -335,16 +355,51 @@ def image_choice_from_output(output, tool_input=None):
         selected_index = int(selected) if selected is not None else None
     except (TypeError, ValueError):
         selected_index = None
-    return {
-        "kind": "image",
+    kind = "voice" if normalize_tool_name(tool) == "add_voice" else "image"
+    choice = {
+        "kind": kind,
         "status": str(output.get("status") or ("completed" if selected_index is not None else "")),
-        "prompt": str(tool_input.get("prompt") or output.get("prompt") or ""),
-        "file_path": str(output.get("file_path") or tool_input.get("file_path") or ""),
         "candidates": candidates,
         "selected_index": selected_index,
         "selection_method": str(output.get("selection_method") or ""),
-        "attribution": _attribution_list(output.get("attribution")),
+        "attribution": _attribution_list(output.get("attribution")) if kind == "image" else [],
     }
+    if kind == "image":
+        choice.update({
+            "prompt": str(tool_input.get("prompt") or output.get("prompt") or ""),
+            "file_path": str(output.get("file_path") or tool_input.get("file_path") or ""),
+        })
+    else:
+        identity = tool_input.get("voice_identity") if isinstance(tool_input.get("voice_identity"), dict) else {}
+        clean_identity = {}
+        if identity.get("gender") in ("feminine", "masculine"):
+            clean_identity["gender"] = identity["gender"]
+        if identity.get("use_case") in ("narration", "conversational", "advertising", "entertainment", "educational", "characters"):
+            clean_identity["use_case"] = identity["use_case"]
+        try:
+            if identity.get("index") is not None:
+                clean_identity["index"] = max(0, int(identity["index"]))
+        except (TypeError, ValueError):
+            pass
+        choice.update({
+            "text": str(tool_input.get("text") or output.get("text") or "")[:1500],
+            "language": str(tool_input.get("language") or output.get("language") or "")[:35],
+            "voice_identity": clean_identity,
+            "voice_id": str(output.get("voice_id") or ""),
+            "play_counts": _numeric_list(output.get("play_counts"), integer=True),
+            "listen_seconds": _numeric_list(output.get("listen_seconds")),
+        })
+    return choice
+
+
+def image_choice_from_output(output, tool_input=None):
+    """Normalised pending/completed state for ``generate_image`` output."""
+    return media_choice_from_output(output, tool_input, tool="generate_image")
+
+
+def voice_choice_from_output(output, tool_input=None):
+    """Normalised pending/completed state for ``add_voice`` output."""
+    return media_choice_from_output(output, tool_input, tool="add_voice")
 
 
 STOP_BODY = {"kind": "stop"}
@@ -533,7 +588,7 @@ def _short(value, limit=4000) -> str:
     return value[:limit]
 
 
-def map_chunk(chunk, tool_names: dict) -> list:
+def map_chunk(chunk, tool_names: dict, tool_inputs: dict = None) -> list:
     """Map one AI SDK UIMessageChunk to this app's chat SSE events (lane 'a')."""
     if not isinstance(chunk, dict):
         return []
@@ -558,6 +613,8 @@ def map_chunk(chunk, tool_names: dict) -> list:
                 detail = questions[0]["question"]
         elif name == "generate_image" and isinstance(tool_input, dict):
             detail = str(tool_input.get("prompt") or tool_input.get("file_path") or detail)
+        elif name == "add_voice" and isinstance(tool_input, dict):
+            detail = str(tool_input.get("text") or detail)
         return [{
             "type": "tool_call", "id": call_id, "tool": name, "name": title,
             "model": "a", "title": title, "summary": title, "rel": title,
@@ -581,8 +638,9 @@ def map_chunk(chunk, tool_names: dict) -> list:
             "model": "a", "rel": tool_display_name(name), "ok": ok,
             "status": "ok" if ok else "error", "output": _short(output),
         }]
-        if ok and name == "generate_image":
-            choice = image_choice_from_output(output)
+        if ok and name in ("generate_image", "add_voice"):
+            choice = media_choice_from_output(
+                output, (tool_inputs or {}).get(call_id), tool=name)
             if choice:
                 events.append({
                     "type": "media_choice_done", "id": call_id,

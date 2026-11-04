@@ -1,4 +1,4 @@
-# Arena Desktop v5.6.1 - Start Here
+# Arena Desktop v5.7.0 - Start Here
 
 Arena Desktop is an unofficial Windows client for arena.ai. It is not affiliated with or endorsed by Arena AI Inc.
 
@@ -35,7 +35,7 @@ Use only cookies from your own Arena account. Cookies can grant access to the se
 4. If the result does not include `arena-auth-prod-v1`, open DevTools -> Application -> Cookies -> `https://arena.ai` and copy all `arena-auth-prod-v1.*` rows in `name=value; name2=value2` form.
 5. Click **Sign in with cookies**. The app imports the Arena auth cookies, verifies the account, and stores the session locally.
 
-The local session file `%USERPROFILE%\.arena-personal\cookies.txt` may be unencrypted. Signing out removes it.
+The local session in `%USERPROFILE%\.arena-personal\cookies.txt` is protected with Windows DPAPI for the current Windows user; older plaintext files are migrated when loaded. Treat it as sensitive anyway. Signing out removes it.
 
 ## Main features
 
@@ -46,8 +46,9 @@ The local session file `%USERPROFILE%\.arena-personal\cookies.txt` may be unencr
 - Arena Agent inside the app through direct API calls; a separate Local Agent remains available and its default for new chats is selected in Settings -> Permissions.
 - **Workspace Sync** switch (right of the permission selector, shown in every mode): when on, models can run commands and use tools in the folder selected on this computer, with results returned to them automatically — in Direct, Side by Side, Battle (Text/Web Search) and the Local Agent; files the native Arena Agent creates in its cloud workspace are downloaded into the selected folder too. When off, models only chat, Code files are not mirrored and Arena Agent files stay in Arena's workspace.
 - Local and cloud Arena history, continuation of existing Arena sessions, Workspace files, media, and permissions. Deleting a chat here also archives it on arena.ai.
-- Multiple Arena accounts: click the profile to switch between saved accounts or add another one (sign-in window or cookies). Each account keeps its own chat list; an account whose session Arena no longer accepts is marked "Session expired: sign in". Saved sessions live in `%USERPROFILE%\.arena-personal\accounts.json` (unencrypted, like cookies.txt — treat it as a password). Switching is blocked while a generation is running.
+- Multiple Arena accounts: click the profile to switch between saved accounts or add another one (sign-in window or cookies). Each account keeps its own chat list; an account whose session Arena no longer accepts is marked "Session expired: sign in". Saved sessions live in `%USERPROFILE%\.arena-personal\accounts.json`; cookie values there are also protected with Windows DPAPI for the current Windows user. Switching is blocked while a generation is running.
 - Parallel chats: a chat appears in the sidebar as soon as you send the prompt, and other chats stay fully usable while one is generating. A spinning circle marks a working chat; a green check marks a chat that finished while you were elsewhere. Stop acts on the open chat only.
+- Ctrl+K opens a command palette for chats, message search, Compact, Markdown/HTML export, models and panels. The Workspace panel also has a Git tab for status, diff, stage/unstage and local commits (no push).
 - File attachments with the **+** button, drag and drop onto the message box, or paste from the clipboard. Battle/Direct/Side by Side accept PNG/JPEG/WebP/PDF (15 MB, Video 10 MB); Agent Mode also accepts GIF/TXT/MD/CSV/HTML/XML/CSS/JS/JSON (25 MB per file, PDF 10 MB, 50 MB per message).
 - Official Arena account connectors (Agent Mode only, with per-connector on/off switches) plus separate local MCP servers. In Connectors, **Add** opens ready-made presets (including Playwright), JSON configuration, and CLI-command setup.
 - Real profile, connector, and model/organization icons where Arena supplies them; initials are only a fallback.

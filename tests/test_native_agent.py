@@ -346,3 +346,99 @@ def test_history_refresh_merge_preserves_local_turn_details():
     assert added2 == 2
     assert [m["text"] for m in merged2].count("Answer") == 1
     assert merged2[-1]["text"] == "New answer"
+
+
+def test_native_add_voice_mapping_and_completed_stats():
+    names = {}
+    tool_input = {
+        "text": "This is the audition line.",
+        "language": "en-GB",
+        "voice_identity": {
+            "gender": "feminine", "use_case": "narration", "index": 2,
+            "unexpected": "do not keep",
+        },
+    }
+    call = na.map_chunk({
+        "type": "tool-input-available", "toolCallId": "voice1",
+        "toolName": "arena__add_voice", "input": tool_input,
+    }, names)[0]
+    assert call["tool"] == "add_voice"
+    assert call["name"] == "Choose voice"
+    assert call["path"] == tool_input["text"]
+
+    pending = {
+        "status": "awaiting_user_response",
+        "candidates": [{"index": 0, "hash": "c" * 43},
+                       {"index": 1, "hash": "d" * 43}],
+    }
+    waiting = na.map_chunk({
+        "type": "tool-output-available", "toolCallId": "voice1", "output": pending,
+    }, names, {"voice1": tool_input})[0]
+    assert waiting["type"] == "hitl_wait" and waiting["tool"] == "add_voice"
+
+    choice = na.voice_choice_from_output(pending, tool_input)
+    assert choice["kind"] == "voice"
+    assert choice["text"] == tool_input["text"]
+    assert choice["language"] == "en-GB"
+    assert choice["voice_identity"] == {
+        "gender": "feminine", "use_case": "narration", "index": 2}
+    assert choice["attribution"] == []
+
+    completed = {
+        **pending, "status": "completed", "selected_index": 1,
+        "selection_method": "user", "voice_id": "voice-42",
+        "play_counts": ["2", -1], "listen_seconds": [1.25, "bad"],
+    }
+    events = na.map_chunk({
+        "type": "tool-output-available", "toolCallId": "voice1", "output": completed,
+    }, names, {"voice1": tool_input})
+    assert [event["type"] for event in events] == ["tool_result", "media_choice_done"]
+    settled = events[1]["media_choice"]
+    assert settled["selected_index"] == 1
+    assert settled["voice_id"] == "voice-42"
+    assert settled["play_counts"] == [2, 0]
+    assert settled["listen_seconds"] == [1.25, 0.0]
+
+
+def test_history_import_carries_voice_input_to_settled_result():
+    from arena import history_sync
+
+    session = {"messages": [
+        {"role": "assistant", "createdAt": "2026-01-01T00:00:00Z", "parts": [
+            {"type": "tool-invocation", "toolInvocation": {
+                "toolCallId": "voice1", "toolName": "arena__add_voice",
+                "input": {
+                    "text": "Read this carefully.", "language": "en",
+                    "voice_identity": {"gender": "masculine", "use_case": "educational"},
+                },
+                "output": {"status": "awaiting_user_response", "candidates": [
+                    {"index": 0, "hash": "c" * 43}, {"index": 1, "hash": "d" * 43}]},
+            }},
+        ]},
+        {"role": "user", "createdAt": "2026-01-01T00:00:01Z", "parts": [
+            {"type": "data-tool-results", "data": [{
+                "toolCallId": "voice1", "tool": "add_voice",
+                "output": {
+                    "status": "completed", "candidates": [
+                        {"index": 0, "hash": "c" * 43}, {"index": 1, "hash": "d" * 43}],
+                    "selected_index": 0, "selection_method": "user",
+                    "voice_id": "voice-7", "play_counts": [3, 1],
+                    "listen_seconds": [4.5, 1.0],
+                },
+            }]},
+        ]},
+    ]}
+    messages = history_sync.agentic_messages(session)
+    assert len(messages) == 1 and messages[0]["role"] == "assistant"
+    tool = messages[0]["tools"][0]
+    assert tool["tool"] == "add_voice" and tool["status"] == "ok"
+    choice = tool["media_choice"]
+    assert choice["text"] == "Read this carefully."
+    assert choice["language"] == "en"
+    assert choice["voice_identity"] == {"gender": "masculine", "use_case": "educational"}
+    assert choice["voice_id"] == "voice-7"
+    assert choice["play_counts"] == [3, 1]
+    assert choice["listen_seconds"] == [4.5, 1.0]
+
+    pending_only = history_sync.agentic_messages({"messages": [session["messages"][0]]})
+    assert pending_only == []

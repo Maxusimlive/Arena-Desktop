@@ -1307,3 +1307,172 @@ def test_v56_refresh_native_question_and_image_choice(site):
         assert calls['refresh'] > before
         assert not errors, errors
         browser.close()
+
+
+def test_v57_streaming_details_summary_git_and_palette(site):
+    sync_api = pytest.importorskip('playwright.sync_api')
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+        page = browser.new_page(viewport={'width': 1500, 'height': 950})
+        errors = []
+        page.on('pageerror', lambda err: errors.append(str(err)))
+        page.add_init_script("localStorage.setItem('ap-agent-kind', 'local')")
+        page.goto(site + '/?demo=1', wait_until='networkidle')
+
+        choose_mode(page, 'Agent Mode')
+        page.locator('#prompt').fill('Check the project and write a final report')
+        page.locator('#prompt').press('Enter')
+
+        # Open Reflections while the demo turn is still producing events.
+        # The later permission/text rerenders must not close that block.
+        details = page.locator('details.reasoning').last
+        details.wait_for(state='attached', timeout=10000)
+        details.locator('summary').click()
+        assert details.evaluate('(el) => el.open') is True
+        page.get_by_role('button', name='Deny').last.click()
+        page.locator('#stopButton').wait_for(state='hidden', timeout=15000)
+        details = page.locator('details.reasoning').last
+        assert details.evaluate('(el) => el.open') is True
+        assert 'Demo mode: response and events are generated locally.' in details.locator('.reasoning-content').inner_text()
+
+        order = page.locator('.assistant-lane').last.evaluate("""(card) => {
+          const children = [...card.children];
+          return {
+            activity: children.findIndex((node) => node.classList.contains('activity-list')),
+            summary: children.findIndex((node) => node.hasAttribute('data-lane-summary')),
+            summaries: card.querySelectorAll('[data-lane-summary]').length,
+          };
+        }""")
+        assert order['activity'] >= 0
+        assert order['summary'] > order['activity']
+        assert order['summaries'] == 1
+
+        page.locator('#workspaceGitTab').click()
+        page.locator('#workspaceGit').get_by_text('Stage all changes').wait_for(timeout=10000)
+        page.locator('#workspaceGit').get_by_role('button', name='Stage all changes').click()
+        page.wait_for_function(
+            "() => document.querySelector('#workspaceGit')?.innerText.includes('0 modified · 0 untracked')",
+            timeout=10000)
+        page.locator('.git-commit-message').fill('Demo commit from Arena Desktop')
+        page.wait_for_function(
+            "() => !document.querySelector('[data-git-commit]')?.disabled", timeout=10000)
+        page.locator('[data-git-commit]').click()
+        page.wait_for_function(
+            "() => document.querySelector('#workspaceGit')?.innerText.includes('Demo commit from Arena Desktop')",
+            timeout=10000)
+
+        page.keyboard.press('Control+K')
+        palette = page.locator('.command-palette')
+        palette.wait_for(timeout=10000)
+        palette.locator('input').fill('Compact')
+        option = palette.locator('.command-palette-item', has_text='Compact current chat')
+        option.wait_for(timeout=10000)
+        option.click()
+        page.locator('.modal', has_text='Compact conversation').wait_for(timeout=10000)
+        page.locator('.modal').get_by_role('button', name='Cancel').click()
+        assert not errors, errors
+        browser.close()
+
+
+def test_v57_voice_choice_stats_and_saved_summary_order(site):
+    sync_api = pytest.importorskip('playwright.sync_api')
+    chat_id = '22345678-1234-4234-8234-123456789abc'
+    final_text = ('## Summary\n\nThe voice has been selected and the work is complete. '
+                  + ('This final report stays below the work timeline. ' * 24))
+    messages = [
+        {'role': 'user', 'text': 'Choose a narration voice.'},
+        {
+            'role': 'assistant', 'text': final_text, 'text_b': '',
+            'reasoning': 'I checked the voice options.',
+            'names': {'a': 'Agent', 'b': None},
+            'tools': [
+                {'lane': 'a', 'tool': 'read_file', 'summary': 'Read narration.txt',
+                 'status': 'ok', 'ok': True},
+            ],
+        },
+    ]
+    chat = {
+        'id': chat_id, 'title': 'Voice ordering', 'mode': 'agent', 'modality': 'text',
+        'model_a': None, 'model_b': None, 'messages': messages,
+    }
+    pending_voice = {
+        'id': 'voice-choice-1', 'chat_id': chat_id, 'tool_call_id': 'voice1',
+        'kind': 'voice', 'status': 'awaiting_user_response',
+        'text': 'This is the audition line.', 'language': 'en-GB',
+        'voice_identity': {'gender': 'feminine', 'use_case': 'narration'},
+        'selected_index': None, 'selection_method': '',
+        'candidates': [
+            {'index': 0, 'hash': 'c' * 43},
+            {'index': 1, 'hash': 'd' * 43},
+        ],
+        'attribution': [],
+    }
+    answers = []
+
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+        page = browser.new_page(viewport={'width': 1400, 'height': 950})
+        errors = []
+        page.on('pageerror', lambda err: errors.append(str(err)))
+
+        def api(route):
+            path = route.request.url.split('?', 1)[0].split('/api/', 1)[1]
+            if path.startswith('media-choices/') and route.request.method == 'POST':
+                body = route.request.post_data_json
+                answers.append(body)
+                return route.fulfill(status=200, content_type='application/json', body=json.dumps({
+                    'ok': True, 'selected_index': body.get('selected_index'),
+                    'selection_method': 'user', 'voice_id': 'voice-57',
+                    'play_counts': body.get('play_counts'),
+                    'listen_seconds': body.get('listen_seconds'),
+                }))
+            values = {
+                'status': {'authenticated': True, 'mode': 'agent', 'modality': 'text',
+                           'desktop': True, 'permission_mode': 'default',
+                           'workspace': 'C:\\\\test'},
+                'chats': [chat],
+                'chats/' + chat_id: chat,
+                'history': messages,
+                'models': [],
+                'permissions': [],
+                'permission-mode': {'ok': True, 'mode': 'default'},
+                'questions': [],
+                'media-choices': [pending_voice],
+                'workspace': {'workspace': 'C:\\\\test', 'projects': []},
+            }
+            return route.fulfill(status=200, content_type='application/json',
+                                 body=json.dumps(values.get(path, {'ok': True})))
+
+        page.route('**/api/**', api)
+        page.goto(site, wait_until='networkidle')
+        page.get_by_role('button', name='Open chat: Voice ordering').click()
+
+        order = page.locator('.assistant-lane').last.evaluate("""(card) => {
+          const children = [...card.children];
+          return {
+            activity: children.findIndex((node) => node.classList.contains('activity-list')),
+            summary: children.findIndex((node) => node.hasAttribute('data-lane-summary')),
+            summaries: card.querySelectorAll('[data-lane-summary]').length,
+          };
+        }""")
+        assert order['activity'] >= 0 and order['summary'] > order['activity']
+        assert order['summaries'] == 1
+
+        card = page.locator('[data-media-choice-card="voice-choice-1"]')
+        card.wait_for(timeout=10000)
+        assert card.locator('audio').count() == 2
+        assert 'This is the audition line.' in card.inner_text()
+        card.locator('audio').nth(1).evaluate("(el) => el.dispatchEvent(new Event('play'))")
+        page.wait_for_timeout(180)
+        card.locator('.media-choice-option').nth(1).locator('button', has_text='Use this voice').click()
+        page.wait_for_function(
+            "() => document.querySelector('[data-media-choice-card=\"voice-choice-1\"]')?.innerText.includes('Voice ID: voice-57')",
+            timeout=10000)
+        assert len(answers) == 1
+        assert answers[0]['selected_index'] == 1
+        assert answers[0]['play_counts'] == [0, 1]
+        assert answers[0]['listen_seconds'][0] == 0
+        assert answers[0]['listen_seconds'][1] > 0
+        assert 'Played 1×' in card.inner_text()
+        assert not errors, errors
+        browser.close()

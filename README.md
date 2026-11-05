@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.7.0-8b5cf6?style=flat-square" alt="Version 5.7.0" />
+  <img src="https://img.shields.io/badge/version-5.8.1-8b5cf6?style=flat-square" alt="Version 5.8.1" />
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-blue?style=flat-square" alt="Windows 10/11" />
   <img src="https://img.shields.io/badge/python-3.11%2B-3776ab?style=flat-square" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/models-400%2B%20via%20arena.ai-10b981?style=flat-square" alt="400+ models via arena.ai" />
@@ -108,6 +108,19 @@ The app orchestrates chats, tools, files and permissions around it.
   export beside Markdown, and safe `arenadesktop://` links that can open a chat or prefill
   a prompt without sending it. Saved cookie files and account sessions are now protected
   with Windows DPAPI for the current user (older plaintext files migrate on load).
+- **Native Agent sub-agents (v5.8)**: the genuine Arena Agent can start up to six
+  children asynchronously using task/result files in the chosen Workspace. Each child
+  has a separate temporary Gateway and inherits permissions. The parent keeps working.
+  All children share the same files: separate gateways are not filesystem isolation.
+  Coordinate non-overlapping edits and review results. Arena rate limits still apply.
+- **Gateway and prompts (v5.8)**: with Workspace Sync enabled for an Agent turn,
+  a configured Gateway starts automatically and its address and pairing code are sent
+  privately to the agent. The Gateway reports on only after its health endpoint responds;
+  repeated failed checks turn it off. A missing helper is offered for installation,
+  never installed silently. Question cards also handle input-only Arena events.
+- **Local security**: API requests use a per-process token; HTML Workspace previews
+  are scriptless and network-restricted. Scheduled automations are plan-only, including
+  older schedules previously saved with broader permissions.
 - **Sub-agents**: the Local Agent (and Direct with Workspace Sync) can delegate a self-contained
   sub-task to a child chat with its own Arena session and tool loop — research (read-only) or work —
   and pick the sub-agent's model. Only the child's summary returns to the parent, so long projects
@@ -120,7 +133,7 @@ The app orchestrates chats, tools, files and permissions around it.
   `MEMORY.md` in the selected folder travel with the first message of each new conversation.
   Models can update `MEMORY.md` while they work ("remember this"), Compact appends its session
   summary there, and both files are editable in Settings → Memory.
-- Desktop comforts: update checks against GitHub Releases (Settings → About), an optional system
+- Desktop comforts: update checks against `Maxusimlive/Arena-Desktop` GitHub Releases (Settings → About), an optional system
   tray with a global Ctrl+Alt+A show/hide hotkey, settings export/import (never account cookies),
   a copyable diagnostics report, portable mode (`portable.txt` beside the EXE keeps data in `./data`),
   and launch flags (`--profile <id|email>`, `--background`, `--mode <id>`).
@@ -156,20 +169,20 @@ The app orchestrates chats, tools, files and permissions around it.
   per-model, new-account video gate) instead of a bare “429”. Built-in request pacing spaces out
   bursts and queues a resend until Arena's reset, so short throttles stop killing tasks (it does
   not raise Arena's daily usage limit; strength is adjustable in Settings).
-- **Rich workspace previews** (v5.5.1): clicking a file renders HTML/SVG in a sandboxed frame
-  (relative CSS/images from the same folder load too), Markdown as a document, images,
+- **Rich workspace previews**: HTML is rendered in a scriptless, network-restricted sandbox
+  (relative network resources do not load), Markdown as a document, images,
   audio, video and PDF inline; text/code keeps the classic read-only view with Copy and
   Download; anything else offers Download. Agent-produced audio plays in chat as well.
-- **Agent Gateway** (v5.5, off by default): the genuine Arena Agent can use selected local MCP
+- **Agent Gateway**: the genuine Arena Agent can use selected local MCP
   servers on your PC (Blender, Roblox Studio, files…) — and, since v5.6.1, your picked
   Workspace folder itself as a built-in `workspace` server (list/read/search/write/edit files
   and shell commands, confined to that folder; its own toggle in Settings → Gateway). With
-  both opt-ins on, a temporary pairing-protected Cloudflare tunnel session starts automatically
+  Gateway and automatic start enabled (the defaults; either can be turned off), a temporary pairing-protected Cloudflare tunnel session starts automatically
   with Workspace Sync; Agent chats receive the address invisibly, and a continued chat is
   re-handed a fresh address whenever its tunnel was stopped or expired. Every call follows
   your permission mode, sessions expire and are revocable with one click. Settings →
   Components installs the one external helper (cloudflared, official build, checksum-verified)
-  only when you ask.
+  only when you ask. A lost connection is not automatically reconnected during an active turn.
 - Everyday polish (v5.1.6): human-check windows come to the front instead of hiding behind the
   app; messages can be queued while a chat is generating; composer drafts are kept per chat;
   the Compact chip doubles as a live context-size meter; the model picker shows Recent models;
@@ -242,7 +255,7 @@ App data (config, chats, accounts, logs) lives in `%USERPROFILE%\.arena-personal
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install pytest playwright
-.\.venv\Scripts\python.exe -m pytest tests --ignore=tests/test_ui_browser.py   # unit/API suite
+.\.venv\Scripts\python.exe scripts/run_test_groups.py   # timed unit/API groups
 $env:RUN_BROWSER_TESTS=1; .\.venv\Scripts\python.exe -m pytest tests/test_ui_browser.py  # UI suite (demo mode)
 ```
 

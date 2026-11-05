@@ -736,7 +736,10 @@ def test_v48_attachments_minimal_menus_and_settings(site):
         assert page.locator('#artifactsButton').count() == 0
 
         # Attach an image in Battle/Text: chip appears, then the sent user
-        # message shows the image.
+        # message shows the image. The default is Direct with Max, which
+        # intentionally does not accept attachments.
+        choose_mode(page, 'Battle Mode')
+        choose_modality(page, 'Text')
         png = (b'\x89PNG\r\n\x1a\n' + b'\x00' * 64)
         page.locator('#fileInput').set_input_files(
             {'name': 'cat.png', 'mimeType': 'image/png', 'buffer': png})
@@ -1408,6 +1411,7 @@ def test_v57_voice_choice_stats_and_saved_summary_order(site):
         'attribution': [],
     }
     answers = []
+    cas_headers = []
 
     with sync_api.sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
@@ -1417,6 +1421,14 @@ def test_v57_voice_choice_stats_and_saved_summary_order(site):
 
         def api(route):
             path = route.request.url.split('?', 1)[0].split('/api/', 1)[1]
+            if path.startswith('native-cas/'):
+                import io, wave
+                cas_headers.append(route.request.headers.get('x-arena-token'))
+                buf = io.BytesIO()
+                with wave.open(buf, 'wb') as audio:
+                    audio.setnchannels(1); audio.setsampwidth(2); audio.setframerate(8000)
+                    audio.writeframes(b'\0\0' * 800)
+                return route.fulfill(status=200, content_type='audio/wav', body=buf.getvalue())
             if path.startswith('media-choices/') and route.request.method == 'POST':
                 body = route.request.post_data_json
                 answers.append(body)
@@ -1461,6 +1473,8 @@ def test_v57_voice_choice_stats_and_saved_summary_order(site):
         card = page.locator('[data-media-choice-card="voice-choice-1"]')
         card.wait_for(timeout=10000)
         assert card.locator('audio').count() == 2
+        page.wait_for_function("() => [...document.querySelectorAll('[data-media-choice-card=\"voice-choice-1\"] audio')].every(a => a.src.startsWith('blob:') && a.readyState >= 1)", timeout=10000)
+        assert len(cas_headers) >= 2 and all(cas_headers)
         assert 'This is the audition line.' in card.inner_text()
         card.locator('audio').nth(1).evaluate("(el) => el.dispatchEvent(new Event('play'))")
         page.wait_for_timeout(180)

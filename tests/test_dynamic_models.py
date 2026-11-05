@@ -108,11 +108,13 @@ class TestDynamicModels(unittest.TestCase):
 
 class TestBrowserTools(unittest.TestCase):
     def test_browser_detect_tool(self):
+        from unittest.mock import patch
         tool = BrowserDetectTool(cwd=os.getcwd())
-        output = tool.execute({})
+        # Detection must not depend on which browsers happen to be on a runner.
+        with patch('arena.tools.browser_mcp.detect_installed_browsers', return_value={'Chrome': '/fake/chrome'}):
+            output = tool.execute({})
         self.assertIn("Installed & Available Browsers:", output)
-        # Should detect at least Brave / Chrome / Edge on this Windows machine
-        self.assertTrue("Brave" in output or "Edge" in output or "Chrome" in output)
+        self.assertIn("Chrome", output)
 
     def test_browser_open_url_tool_validation(self):
         tool = BrowserOpenUrlTool(cwd=os.getcwd())

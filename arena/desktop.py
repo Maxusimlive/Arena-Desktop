@@ -52,14 +52,16 @@ def _switch_profile(port, wanted):
     """--profile <id|email>: activate that account on the local server before the UI loads."""
     try:
         import requests
-        data = requests.get(f"http://127.0.0.1:{port}/api/accounts", timeout=5).json()
+        from arena.web import app as web_app
+        headers = {"X-Arena-Token": web_app._API_TOKEN}
+        data = requests.get(f"http://127.0.0.1:{port}/api/accounts", headers=headers, timeout=5).json()
         items = data.get("accounts") if isinstance(data, dict) else data
         for acc in items or []:
             if str(acc.get("id")) == wanted or str(acc.get("email") or "").lower() == wanted.lower():
                 if acc.get("current"):
                     return
                 requests.post(f"http://127.0.0.1:{port}/api/accounts/switch",
-                              json={"id": acc.get("id"), "account_id": acc.get("id")}, timeout=15)
+                              json={"id": acc.get("id"), "account_id": acc.get("id")}, headers=headers, timeout=15)
                 return
         LOG.info("profile %r not found", wanted)
     except Exception:

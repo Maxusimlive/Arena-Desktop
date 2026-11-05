@@ -76,3 +76,29 @@ def test_account_store_encrypts_at_rest_and_migrates(tmp_path, monkeypatch):
     migrated = json.loads(accounts_file.read_text(encoding="utf-8"))
     assert crypto.is_protected(migrated["accounts"][0]["cookie"])
     assert "alice-legacy-cookie" not in accounts_file.read_text(encoding="utf-8")
+
+
+def test_account_dpapi_failure_does_not_write_plaintext_or_destroy_old_store(tmp_path, monkeypatch):
+    accounts = tmp_path / 'accounts.json'
+    accounts.write_text('{"current": null, "accounts": []}', encoding='utf-8')
+    monkeypatch.setattr(web, 'ACCOUNTS_FILE', accounts)
+    _fake_dpapi(monkeypatch)
+    monkeypatch.setattr(crypto, '_dpapi_protect', lambda data: (_ for _ in ()).throw(OSError('DPAPI failed')))
+    assert web._register_account({'email': 'test@example.test'}, 'secret-cookie') is None
+    assert 'secret-cookie' not in accounts.read_text(encoding='utf-8')
+    assert json.loads(accounts.read_text(encoding='utf-8'))['accounts'] == []
+
+
+def test_unreadable_protected_cookie_not_lost_when_other_record_saved(tmp_path, monkeypatch):
+    import base64
+    accounts = tmp_path / 'accounts.json'
+    stored = crypto.PREFIX + base64.b64encode(b'ciphertext').decode('ascii')
+    accounts.write_text(json.dumps({'current': 'a', 'accounts': [{'id': 'a', 'cookie': stored}]}), encoding='utf-8')
+    monkeypatch.setattr(web, 'ACCOUNTS_FILE', accounts)
+    monkeypatch.setattr(crypto, '_dpapi_unprotect', lambda data: (_ for _ in ()).throw(OSError('DPAPI unavailable')))
+    record = web._accounts_load()['accounts'][0]
+    assert record['cookie'] == ''
+    assert web._accounts_save({'current': 'a', 'accounts': [record]})
+    saved = json.loads(accounts.read_text(encoding='utf-8'))['accounts'][0]
+    assert saved['cookie'] == stored
+    assert '_protected_cookie' not in saved

@@ -122,7 +122,8 @@ class GatewayManager:
         self._cloudflared_path = cloudflared_path
         self._log = logger
         self._lock = threading.Lock()
-        self._start_lock = threading.Lock()
+        self._start_lock = threading.RLock()
+        self._generation = 0
         self._state = "off"  # off | starting | on | needs_cloudflared
         self._last_error: Optional[str] = None
         self._token: Optional[str] = None
@@ -176,96 +177,90 @@ class GatewayManager:
     def start(self, servers: List[str], *, idle_minutes: int = 45,
               hard_hours: int = 8, wait_seconds: float = 45,
               tunnel: bool = True) -> Dict[str, Any]:
+        # A second caller joins the existing start instead of creating another
+        # HTTP server/tunnel and orphaning the first one.
         with self._start_lock:
-            if self._state == "on":
-                if sorted(servers) == sorted(self._servers):
+            if self._state in ("on", "starting"):
+                if sorted(servers) != sorted(self._servers):
+                    self.stop("restart with a different server set")
+                elif self._state == "on":
                     return self.status(include_pairing=True)
-                self.stop("restart with a different server set")
-            cf = self._cloudflared_path() if tunnel else None
-            if tunnel and cf is None:
-                self._state = "needs_cloudflared"
-                self._last_error = "cloudflared is not installed"
-                return self.status(include_pairing=True)
-            self._state = "starting"
-            self._last_error = None
-            self._servers = list(servers)
-            self._token = secrets.token_urlsafe(32)
-            self._created = time.time()
-            self._expires = self._created + hard_hours * 3600
-            self._idle_seconds = max(60, idle_minutes * 60)
-            self._touch()
-            self._ready.clear()
-            try:
-                self._index = self._filtered_index()
-                self._start_http()
-                self._running = True
-                self._worker = threading.Thread(target=self._worker_loop, daemon=True)
-                self._worker.start()
-                if tunnel:
-                    self._start_tunnel(str(cf))
-                else:
-                    self._url = f"http://127.0.0.1:{self._http.server_address[1]}"
-                    self._state = "on"
-                    self._ready.set()
-                self._watchdog = threading.Thread(target=self._watchdog_loop, daemon=True)
-                self._watchdog.start()
-            except Exception as e:
-                self._last_error = f"{type(e).__name__}: {e}"
-                self._cleanup()
-                self._state = "off"
-                return self.status(include_pairing=True)
-        self._ready.wait(max(0.0, wait_seconds))
-        if self._state == "starting":
-            if self._url and self._tunnel is not None and self._tunnel.poll() is None:
-                # cloudflared is alive and Cloudflare already handed out the
-                # URL; only this machine's own health probe is still waiting
-                # on DNS/edge propagation (it allows itself 40s, while the
-                # auto-start path waits just 20s). Killing the session here
-                # turned slow DNS into a silent "gateway never started" even
-                # though the tunnel was fine — the agent can typically reach
-                # the URL before the local probe succeeds.
-                self._state = "on"
-                self._ready.set()
+            if self._state != "starting":
+                cf = self._cloudflared_path() if tunnel else None
+                if tunnel and cf is None:
+                    self._state = "needs_cloudflared"
+                    self._last_error = "cloudflared is not installed"
+                    return self.status(include_pairing=True)
+                self._generation += 1
+                generation = self._generation
+                self._state = "starting"
+                self._last_error = None
+                self._servers = list(servers)
+                self._token = secrets.token_urlsafe(32)
+                self._created = time.time()
+                self._expires = self._created + hard_hours * 3600
+                self._idle_seconds = max(60, idle_minutes * 60)
                 self._touch()
-                self._info("tunnel up (local health probe still pending)")
-            else:
-                self._last_error = "tunnel did not come up in time"
-                self.stop("startup timeout")
+                self._ready = threading.Event()
+                try:
+                    self._index = self._filtered_index()
+                    self._start_http()
+                    self._running = True
+                    self._worker = threading.Thread(target=self._worker_loop, args=(generation,), daemon=True)
+                    self._worker.start()
+                    if tunnel:
+                        self._start_tunnel(str(cf), generation)
+                    else:
+                        self._url = f"http://127.0.0.1:{self._http.server_address[1]}"
+                        self._state = "on"
+                        self._ready.set()
+                    self._watchdog = threading.Thread(target=self._watchdog_loop, args=(generation,), daemon=True)
+                    self._watchdog.start()
+                except Exception as e:
+                    self.stop(f"startup failed: {type(e).__name__}: {e}")
+                    return self.status(include_pairing=True)
+            ready = self._ready
+        # The caller's patience is not the tunnel's deadline. Continue probing
+        # in the background; never mark ready without a successful health check.
+        ready.wait(max(0.0, wait_seconds))
         return self.status(include_pairing=True)
 
     def stop(self, reason: str = "stopped") -> Dict[str, Any]:
-        if self._state not in ("off",):
-            self._info(f"stopping ({reason})")
-        if reason not in ("stopped",):
-            self._last_error = reason
-        self._cleanup()
-        self._state = "off"
-        self._token = None
-        self._url = None
-        self._servers = []
-        return self.status()
+        with self._start_lock:
+            if self._state != "off":
+                self._info(f"stopping ({reason})")
+            self._generation += 1
+            self._last_error = None if reason == "stopped" else reason
+            self._cleanup()
+            self._state = "off"
+            self._token = None
+            self._url = None
+            self._servers = []
+            self._ready.set()
+            return self.status()
 
     def _cleanup(self) -> None:
         self._running = False
         with self._job_cv:
+            self._job_queue.clear()
             self._job_cv.notify_all()
         if self._tunnel is not None:
+            proc, self._tunnel = self._tunnel, None
             try:
-                self._tunnel.terminate()
-                self._tunnel.wait(timeout=5)
+                proc.terminate()
+                proc.wait(timeout=5)
             except Exception:
                 try:
-                    self._tunnel.kill()
+                    proc.kill()
                 except Exception:
                     pass
-            self._tunnel = None
         if self._http is not None:
+            server, self._http = self._http, None
             try:
-                self._http.shutdown()
-                self._http.server_close()
+                server.shutdown()
+                server.server_close()
             except Exception:
                 pass
-            self._http = None
         with self._lock:
             for job in self._jobs.values():
                 if job.get("status") in ("queued", "running"):
@@ -279,62 +274,93 @@ class GatewayManager:
         self._http = server
         threading.Thread(target=server.serve_forever, daemon=True).start()
 
-    def _start_tunnel(self, cf: str) -> None:
+    def _start_tunnel(self, cf: str, generation: int) -> None:
         port = self._http.server_address[1]
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        self._tunnel = subprocess.Popen(
+        proc = subprocess.Popen(
             [cf, "tunnel", "--url", f"http://127.0.0.1:{port}", "--no-autoupdate"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             bufsize=1, creationflags=flags)
-        threading.Thread(target=self._tunnel_reader, daemon=True).start()
+        self._tunnel = proc
+        threading.Thread(target=self._tunnel_reader, args=(proc, generation), daemon=True).start()
 
-    def _tunnel_reader(self) -> None:
-        proc = self._tunnel
-        if proc is None or proc.stdout is None:
+    def _tunnel_reader(self, proc, generation: int) -> None:
+        if proc.stdout is None:
             return
         try:
             for line in proc.stdout:
-                if not self._running:
-                    return
-                match = _TUNNEL_URL.search(line or "")
-                if match and not self._url:
-                    self._url = match.group(0)
-                    self._info(f"tunnel up: {self._url}")
-                    threading.Thread(target=self._probe_tunnel, daemon=True).start()
+                with self._start_lock:
+                    if generation != self._generation or not self._running:
+                        return
+                    match = _TUNNEL_URL.search(line or "")
+                    if match and not self._url:
+                        self._url = match.group(0)
+                        self._info("tunnel address assigned; checking health")
+                        threading.Thread(target=self._probe_tunnel,
+                                         args=(self._url, generation), daemon=True).start()
         except Exception:
             pass
-        if self._running and self._state in ("starting", "on"):
-            self._last_error = "cloudflared exited"
-            self.stop("cloudflared exited")
+        with self._start_lock:
+            if generation == self._generation and self._running:
+                self.stop("cloudflared exited")
 
-    def _probe_tunnel(self) -> None:
-        deadline = time.time() + 40
-        while self._running and time.time() < deadline:
+    def _probe_tunnel(self, url: str, generation: int) -> None:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            with self._start_lock:
+                if generation != self._generation or not self._running:
+                    return
             try:
-                with urllib.request.urlopen(f"{self._url}/v1/health", timeout=5) as resp:
-                    if resp.status == 200:
+                with urllib.request.urlopen(f"{url}/v1/health", timeout=5) as resp:
+                    payload = json.loads(resp.read(4096))
+                    healthy = resp.status == 200 and payload.get("ok") is True and payload.get("service") == "arena-desktop-gateway"
+                if healthy:
+                    with self._start_lock:
+                        if generation != self._generation or not self._running:
+                            return
                         self._state = "on"
+                        self._last_error = None
                         self._ready.set()
                         self._touch()
-                        return
+                    return
             except Exception:
                 pass
             time.sleep(1.5)
-        if self._running and self._state == "starting":
-            # Tunnel DNS can lag; the agent can still reach it shortly after.
-            self._state = "on"
-            self._ready.set()
+        with self._start_lock:
+            if generation == self._generation and self._running and self._state == "starting":
+                self.stop("tunnel health check failed; check cloudflared and network")
 
-    def _watchdog_loop(self) -> None:
-        while self._running:
-            time.sleep(15)
-            if not self._running:
-                return
-            if self._expired():
-                self.stop("session expired")
-                return
-            if self._state == "on" and time.time() - self._last_activity > self._idle_seconds:
-                self.stop("idle timeout")
+    def _watchdog_loop(self, generation: int) -> None:
+        failures, last_probe = 0, 0.0
+        while True:
+            time.sleep(5)
+            with self._start_lock:
+                if generation != self._generation or not self._running:
+                    return
+                if self._expired():
+                    self.stop("session expired")
+                    return
+                if self._state == "starting" and not self._url and time.time() - self._created > 60:
+                    self.stop("cloudflared did not provide an address")
+                    return
+                if self._state == "on" and time.time() - self._last_activity > self._idle_seconds:
+                    self.stop("idle timeout")
+                    return
+                url = self._url if self._state == "on" and self._tunnel else None
+            if not url or time.monotonic() - last_probe < 15:
+                continue
+            last_probe = time.monotonic()
+            try:
+                with urllib.request.urlopen(f"{url}/v1/health", timeout=5) as resp:
+                    payload = json.loads(resp.read(4096))
+                    healthy = resp.status == 200 and payload.get("ok") is True and payload.get("service") == "arena-desktop-gateway"
+            except Exception:
+                healthy = False
+            failures = 0 if healthy else failures + 1
+            if failures >= 3:
+                with self._start_lock:
+                    if generation == self._generation and self._running:
+                        self.stop("tunnel lost health checks; restart the session")
                 return
 
     # ---------- tool index / jobs ----------
@@ -396,23 +422,23 @@ class GatewayManager:
         self._touch()
         return job_id, None
 
-    def _worker_loop(self) -> None:
-        while self._running:
+    def _worker_loop(self, generation: int) -> None:
+        while self._running and generation == self._generation:
             with self._job_cv:
-                while self._running and not self._job_queue:
+                while self._running and generation == self._generation and not self._job_queue:
                     self._job_cv.wait(timeout=2)
-                if not self._running:
+                if not self._running or generation != self._generation:
                     return
                 if not self._job_queue:
                     continue
                 job, steps = self._job_queue.popleft()
-            self._run_job(job, steps)
+            self._run_job(job, steps, generation)
 
-    def _run_job(self, job: Dict[str, Any], steps: List[Dict[str, Any]]) -> None:
+    def _run_job(self, job: Dict[str, Any], steps: List[Dict[str, Any]], generation: int) -> None:
         job["status"] = "running"
         server = job["server"]
         for step in steps:
-            if not self._running:
+            if not self._running or generation != self._generation:
                 job["status"] = "error"
                 job["error"] = "gateway session ended"
                 return
@@ -426,6 +452,10 @@ class GatewayManager:
             elif not self._approve(server, tool, bool(spec.get("read_only")),
                                    step.get("arguments") or {}):
                 result["error"] = "denied by the user (or approval timed out)"
+            elif generation != self._generation or not self._running:
+                job["status"] = "error"
+                job["error"] = "gateway session ended"
+                return
             else:
                 try:
                     output = self._call_tool(spec["alias"], step.get("arguments") or {})
@@ -441,6 +471,10 @@ class GatewayManager:
                                 "ms": int((time.time() - started) * 1000)})
             if not result["ok"] and not step.get("continue_on_error"):
                 break
+        if generation != self._generation or not self._running:
+            job["status"] = "error"
+            job["error"] = "gateway session ended"
+            return
         job["status"] = "done" if all(r["ok"] for r in job["results"]) else "error"
         self._touch()
 

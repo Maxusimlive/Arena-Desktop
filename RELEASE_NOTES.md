@@ -1,62 +1,32 @@
-## Arena Desktop v5.7.0
+## Arena Desktop v5.8.1
 
-<p align="right"><a href="https://github.com/Maxusimlive/Arena-Desktop">📂 Repository on GitHub</a></p>
+Patch release on top of v5.8.0 (built on our 5.7.0). Arena Desktop is an unofficial MIT-licensed fork; Arena controls model availability, quotas and the behaviour of its online services.
 
-Arena Desktop 5.7 focuses on reliable streaming, safer attachments and everyday workflow tools. It also completes Arena Agent voice choices and adds optional account-session distribution for sub-agents.
+### Component detection fix (this release)
 
-### Streaming answers no longer lose their place
+- Component detection now also finds cloudflared, Node.js and Python installed system-wide (for example via winget or an official installer), not only the copies installed into the app's data folder. Previously a working system-wide cloudflared was reported as missing — and the Agent Gateway refused to start with "cloudflared is not installed".
+- "Check again" in Settings → Components now performs a real re-detection: cached version strings are dropped and, on Windows, the current registry PATH is consulted, so components installed while the app is already running appear without restarting Arena Desktop.
+- The first-run components prompt no longer appears when everything required is already installed, and optional components (Node.js, Python) no longer trigger it on their own; cloudflared — required for the Gateway — is the only component that prompts at startup.
 
-- An opened **Reflections** block now stays open while new reasoning, tool calls and answer tokens arrive.
-- The broader streaming renderer preserves expanded activity blocks, scroll positions, input focus/caret, text selection and media state instead of resetting the whole turn on every token.
-- For Agent and tool turns, the final report now renders **once, below the work timeline**, from the first token through reloads. Long finished turns get a subtle **Summary ↓** jump — without moving a copy back to the top.
+### Carried over from v5.8.0
 
-### Screenshots and attachments are more defensive
+- A parent native Arena Agent can launch up to six child Agent sessions concurrently and continue its own work. Each child gets a separate temporary Gateway; tasks and reports pass through files in the selected Workspace. Children inherit the parent's permission mode, can be stopped, and cannot delegate again. They share the same Workspace: separate gateways do **not** isolate files. Split edits into non-overlapping tasks and review the results. Arena chooses the model for native Agent sessions and Arena rate limits still apply.
+- Agent Workspace Sync can automatically start a Cloudflare Quick Tunnel and pass its address and pairing code to the agent. Existing explicit Gateway opt-outs are respected. Gateway is shown as on only after a successful health response; if it becomes unavailable during a turn, start a new session and resend — automatic reconnection during that turn is not implemented.
+- Native Agent questions handle Arena's input-only question events. Pending questions, approvals and child controls remain visible even when the chat has no saved messages yet.
+- Local API requests use a per-instance token. Workspace HTML previews are scriptless and network-restricted. Windows DPAPI continues to protect stored cookies, including legacy formats. Existing unattended automations run in read-only Plan mode. Code-mode deployment links are checked against Arena's webdev metadata endpoint.
+- All 5.7 features remain: voice choices, streaming state, Workspace Git, Compact, HTML export and deep links. Update checks point to `Maxusimlive/Arena-Desktop`, independently of upstream.
 
-- File type is detected from content rather than trusting only a filename or declared MIME type.
-- Images are cautiously normalized only when needed, preserving ordinary screenshots and animated GIFs where possible.
-- Direct, Side by Side and fan-out sends stop before upload when a selected model is explicitly known not to accept the attached image/file kind. Unknown catalogue capabilities are not treated as a ban.
-- Attachment chips show the detected format, image dimensions, resulting size and normalization state.
-- If Arena rejects an upload, the draft and attachment stay in the composer with Retry/Remove instead of being silently lost.
-- **Copy diagnostics** now includes the last 20 upload attempts with stage, source (`picker`, `paste`, `drop` or `workspace`), app mode, safe Arena/storage statuses, MIME types, byte counts and image dimensions. It deliberately excludes filenames, file contents/hashes, cookies, storage keys and signed URLs.
+### Limits and verification
 
-### Arena Agent can ask you to choose a voice
+- Local validation: 381 non-browser tests passed on Linux; 27 browser tests passed on Linux; the new component-detection tests also pass under Windows Python (Wine). The x64 EXE passed PE architecture checks and 72 embedded-content checks. These checks do not replace live account testing.
+- Live native Agent child sessions, Cloudflare tunnels and the webdev metadata endpoint have not been verified against a signed-in Arena account in Windows. Local tests use simulated responses; Arena can change its protocol.
+- Windows builds are unsigned and can trigger SmartScreen. ARM64 is configured in CI but was not locally built or tested. cloudflared's Windows x64 build requires emulation on Windows ARM64.
+- The app does not solve human checks. Complete them in the Arena sign-in window.
 
-- Native Arena Agent `add_voice` auditions now appear as an interactive voice-choice card.
-- Both candidates can be played in the app; the audition text, language and voice identity stay visible.
-- Your selection, returned `voice_id`, play counts and listening time are sent back into the same Arena session.
-- Completed voice choices survive reopening, refresh and Arena history import; unlike generated images, voices do not receive a model reveal.
+### Download
 
-### New everyday tools
+Extract the source ZIP and run `Arena-Desktop.exe` from its top-level folder. The EXE is a GitHub release asset, not a committed source file.
 
-- **Ctrl+K command palette:** jump to recent chats, search message text, start a chat, change mode/model where allowed, open Workspace Git, export, focus the composer or run **Compact**.
-- **Workspace Git panel:** see branch/status, inspect staged and unstaged diffs, stage/unstage selected files or everything, and create a local commit using the repository's own identity/hooks. It never pushes, pulls or switches branches.
-- **Heavy-send badge:** when a large conversation is about to go to a premium model, the composer warns that this send may use a larger part of Arena's daily balance. Clicking it opens Usage.
-- **Styled HTML chat export:** beside Markdown, export a standalone HTML transcript with both lanes, reasoning, tools and attachment names — escaped, with locked-down CSP and safe link handling.
+- Windows x64 EXE: `Arena-Desktop.exe` — 30,138,273 bytes; SHA-256 `d8df8aa94a21bd73a5cb58eb13ef1f73cdb8732c12e748b7796f10b224871a81`.
 
-### Optional multi-session sub-agents
-
-A new Settings option can distribute **child chats from delegation, fan-out and parallel research** across your saved Arena accounts using isolated HTTP sessions and per-account cookie updates. It is **off by default**, keeps parent chats and native Arena Agent on the current account, does not rotate around a daily limit, and records which account actually ran each child. The visible Arena browser window remains single-account.
-
-### Deep links and DPAPI-protected sessions
-
-- The packaged EXE registers `arenadesktop://` for the current Windows user (HKCU, no administrator rights).
-- Supported links: `arenadesktop://open`, `arenadesktop://new`, `arenadesktop://chat?id=<chat-id>` and `arenadesktop://ask?q=<text>`.
-- An `ask` link only creates a draft and focuses the composer — it **never sends automatically**. A second process hands the link to the already-running window through a per-launch local token and exits.
-- `cookies.txt` and cookie values in `accounts.json` are now saved in a versioned Windows DPAPI form for the current user. Existing plaintext values are read safely and migrated on load.
-
-### Agent Gateway auto-start fixed
-
-- The gateway could silently never start in a fresh app run even with both Gateway opt-ins enabled: the UI only learned those settings after a Settings toggle changed, so the automatic warm-up never fired. Settings are now loaded at startup, and a failed warm-up retries after a cooldown instead of latching off for the whole run.
-- A slow Cloudflare Quick Tunnel (DNS/edge propagation) no longer gets killed by the shorter auto-start wait while its health probe is still pending — a live tunnel that already has its URL stays up.
-- Auto-start skips and failures are now written to the app log with the reason (Workspace Sync off, nothing to expose, tunnel state/error) instead of failing silently.
-
-### Builds
-
-- This release asset is the verified **Windows x64** one-file EXE.
-- The repository now includes GitHub Actions for both Windows x64 and native Windows ARM64 builds (`windows-11-arm`, Python 3.12 arm64), including PE-architecture verification of the produced artifacts. Cloudflare does not publish a Windows ARM64 cloudflared build for the pinned release, so on ARM64 Windows that optional Gateway helper remains the official x64 file run by Windows emulation.
-
-**Verification** — 349 automated tests pass (one pre-existing test that expects locally installed Windows browsers is deselected in the Linux sandbox), 23/23 browser UI tests pass, and 69/69 packaged-EXE integrity checks pass. The Gateway auto-start fix adds a slow-tunnel regression test (gateway group 9/9, engine JS 17/17, native agent 18/18 re-run against the rebuilt EXE). Live Arena/Windows acceptance for real screenshots, `add_voice`, registry links and DPAPI migration is still the most valuable feedback for this release.
-
-📥 **Download `Arena-Desktop.exe`** (26,396,227 bytes) — no installation needed, just run it.
-SHA-256: `2744809e2eda165629d820e63e37d4b5dc964455a74afcead947c71af3952e0e`
-💬 Discord: `@.max_power._`
+Arena Desktop is not affiliated with or endorsed by Arena AI Inc. Original upstream: [PlayzAe/arena.ai-desktop](https://github.com/PlayzAe/arena.ai-desktop). License: MIT.

@@ -61,9 +61,64 @@ def _host_architecture() -> str:
     return raw or "unknown"
 
 
+def _windows_registry_paths() -> List[str]:
+    """PATH entries from the registry (system + current user).
+
+    A process keeps the PATH it was started with, so tools installed while
+    the app is running (winget, installers) stay invisible to shutil.which
+    until the app restarts — the registry is where Windows actually records
+    the updated PATH, so consult it on every fresh detection.
+    """
+    if not _is_windows():
+        return []
+    try:
+        import winreg
+    except Exception:
+        return []
+    entries: List[str] = []
+    locations = (
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+    )
+    for root, key_path in locations:
+        try:
+            with winreg.OpenKey(root, key_path) as key:
+                value, _ = winreg.QueryValueEx(key, "Path")
+        except OSError:
+            continue
+        if value:
+            entries.extend(
+                os.path.expandvars(part.strip())
+                for part in str(value).split(";") if part.strip())
+    return entries
+
+
+def _search_path() -> Optional[str]:
+    """Process PATH merged with the registry PATH (Windows only)."""
+    parts = [p for p in (os.environ.get("PATH") or "").split(os.pathsep) if p]
+    seen = {p.lower() for p in parts}
+    for entry in _windows_registry_paths():
+        if entry.lower() not in seen:
+            parts.append(entry)
+            seen.add(entry.lower())
+    return os.pathsep.join(parts) or None
+
+
+def _which(name: str) -> Optional[str]:
+    return shutil.which(name, path=_search_path())
+
+
 def cloudflared_path() -> Optional[Path]:
     candidate = BIN_DIR / ("cloudflared.exe" if _is_windows() else "cloudflared")
-    return candidate if candidate.is_file() else None
+    if candidate.is_file():
+        return candidate
+    # Also honour a system-wide install (winget, manual, package manager):
+    # previously only the app-data copy counted, so a perfectly good
+    # cloudflared on PATH was reported missing and the Gateway refused
+    # to start with "cloudflared is not installed".
+    found = _which("cloudflared")
+    return Path(found) if found else None
 
 
 def _run_version(args: List[str], cache_key: str) -> Optional[str]:
@@ -101,14 +156,22 @@ def _webview2_version() -> Optional[str]:
     return None
 
 
-def detect() -> List[Dict[str, Any]]:
-    """Current status of every known component (cheap enough for a settings tab)."""
+def detect(refresh: bool = False) -> List[Dict[str, Any]]:
+    """Current status of every known component (cheap enough for a settings tab).
+
+    ``refresh=True`` (the Components tab's "Check again") drops the cached
+    version strings; detection itself always re-reads the filesystem and,
+    on Windows, the registry PATH, so components installed while the app
+    was already running are picked up without a restart.
+    """
+    if refresh:
+        _version_cache.clear()
     cf = cloudflared_path()
     cf_version = _run_version([str(cf), "--version"], "cloudflared") if cf else None
-    node = shutil.which("node")
-    python = shutil.which("py") or shutil.which("python")
+    node = _which("node")
+    python = _which("py") or _which("python")
     webview2 = _webview2_version()
-    winget = bool(shutil.which("winget")) if _is_windows() else False
+    winget = bool(_which("winget")) if _is_windows() else False
     host_arch = _host_architecture()
     cloudflared_note = ("Single file, no administrator rights. Some antivirus tools flag "
                         "cloudflared because tunnel tools are dual-use; this copy is the "

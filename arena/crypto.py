@@ -87,7 +87,15 @@ def unprotect_text(value: str) -> str:
     """Decode a versioned DPAPI value; legacy plaintext is unchanged."""
     text = str(value or "")
     if not is_protected(text):
-        return text
+        # Upstream v1.2 stores base64(b"DPAPI:" + ciphertext). Never decode
+        # arbitrary base64-looking cookie values: only the exact marker counts.
+        try:
+            raw = base64.b64decode(text, validate=True)
+        except (ValueError, binascii.Error):
+            return text
+        if not raw.startswith(b"DPAPI:"):
+            return text
+        return _dpapi_unprotect(raw[6:]).decode("utf-8")
     try:
         encrypted = base64.b64decode(text[len(PREFIX):], validate=True)
     except (ValueError, binascii.Error) as exc:
@@ -98,9 +106,15 @@ def unprotect_text(value: str) -> str:
 def decode_cookie(value: object) -> str:
     """Best-effort cookie decoding that fails closed for protected data."""
     text = str(value or "")
-    if not is_protected(text):
-        return text
     try:
         return unprotect_text(text)
     except Exception:
         return ""
+
+
+def encrypt(data: bytes) -> bytes:
+    return protect_text(data.decode("utf-8")).encode("utf-8")
+
+
+def decrypt(data: bytes) -> bytes:
+    return unprotect_text(data.decode("utf-8")).encode("utf-8")

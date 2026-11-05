@@ -257,8 +257,10 @@ def test_two_chats_stream_in_parallel_without_crossing_sessions(env, monkeypatch
     assert saved_evals == eval_ids
 
 
-def test_status_lists_generating_chats(env):
+def test_status_lists_generating_chats(env, monkeypatch):
     client, _chats = env
+    monkeypatch.setattr(web, "get_client", lambda: type("C", (), {"eval_id": None, "cookie_str": ""})())
+    monkeypatch.setattr(web, "_signed_in_somewhere", lambda _client: False)
     web._generation_started("chat-x")
     try:
         payload = client.get("/api/status").get_json()

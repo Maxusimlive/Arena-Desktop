@@ -12,6 +12,7 @@ import logging
 import mimetypes
 import os
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -172,6 +173,7 @@ def _find_preview_url(val):
 
 from arena import agent, components, connectors, contracts, crypto, history_sync, native_agent, permissions, workspace
 from arena.gateway import GatewayManager
+from arena.native_subagents import NativeSubagentPool
 from arena.api import generate_uuidv7
 from arena.auth import get_clipboard_text
 from arena.engine import ENGINE
@@ -189,6 +191,7 @@ _active_generations = 0
 _active_chat_ids: set = set()
 _chat_stops: dict = {}
 _chat_setup_lock = threading.Lock()
+_chat_file_lock = threading.RLock()
 _last_webdev: dict = {}
 
 
@@ -275,8 +278,9 @@ else:
 STATIC_DIR = _base / "arena" / "web" / "static" if getattr(sys, 'frozen', False) else Path(__file__).parent / "static"
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="/static")
+_API_TOKEN = secrets.token_urlsafe(32)
 
-APP_VERSION = "5.7.0"
+APP_VERSION = "5.8.1"
 
 
 @app.after_request
@@ -310,46 +314,47 @@ def _save_chat(chat_id: str, title: str, messages: list,
                pending_digest: str = None, parent_id: str = None,
                delegate_guide: bool = None, gateway_session: str = None,
                account_id: str = None):
-    if not _validate_chat_id(chat_id):
-        return
-    chat_dir = CHATS_DIR / chat_id
-    chat_dir.mkdir(parents=True, exist_ok=True)
-    chat_file = chat_dir / "chat.json"
-    now = datetime.now(timezone.utc).isoformat()
-    existing = {}
-    if chat_file.exists():
-        try:
-            existing = json.loads(chat_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    data = {
-        "id": chat_id,
-        "title": title,
-        "account_id": existing.get("account_id") or account_id or _current_account_id(),
-        "created_at": existing.get("created_at", now),
-        "updated_at": now,
-        "mode": mode,
-        "modality": modality,
-        "model_a": model_a,
-        "model_b": model_b,
-        "eval_id": eval_id,
-        "source": source or existing.get("source") or "local",
-        "tools_guide": bool(tools_guide) if tools_guide is not None else bool(existing.get("tools_guide")),
-        "mcp_guide_hash": mcp_guide_hash if mcp_guide_hash is not None else existing.get("mcp_guide_hash"),
-        "memory_hash": memory_hash if memory_hash is not None else existing.get("memory_hash"),
-        "pending_digest": pending_digest if pending_digest is not None else existing.get("pending_digest"),
-        "parent_id": (parent_id or None) if parent_id is not None else existing.get("parent_id"),
-        "delegate_guide": bool(delegate_guide) if delegate_guide is not None else bool(existing.get("delegate_guide")),
-        "agent_backend": agent_backend or existing.get("agent_backend"),
-        "gateway_session": gateway_session if gateway_session is not None else existing.get("gateway_session"),
-        "native": native if native is not None else existing.get("native"),
-        "messages": messages,
-    }
-    # Atomic replace: readers (chat list, parallel chats) never see a
-    # half-written file.
-    tmp_file = chat_dir / "chat.json.tmp"
-    tmp_file.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp_file, chat_file)
+    with _chat_file_lock:
+        if not _validate_chat_id(chat_id):
+            return
+        chat_dir = CHATS_DIR / chat_id
+        chat_dir.mkdir(parents=True, exist_ok=True)
+        chat_file = chat_dir / "chat.json"
+        now = datetime.now(timezone.utc).isoformat()
+        existing = {}
+        if chat_file.exists():
+            try:
+                existing = json.loads(chat_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        data = {
+            "id": chat_id,
+            "title": title,
+            "account_id": existing.get("account_id") or account_id or _current_account_id(),
+            "created_at": existing.get("created_at", now),
+            "updated_at": now,
+            "mode": mode,
+            "modality": modality,
+            "model_a": model_a,
+            "model_b": model_b,
+            "eval_id": eval_id,
+            "source": source or existing.get("source") or "local",
+            "tools_guide": bool(tools_guide) if tools_guide is not None else bool(existing.get("tools_guide")),
+            "mcp_guide_hash": mcp_guide_hash if mcp_guide_hash is not None else existing.get("mcp_guide_hash"),
+            "memory_hash": memory_hash if memory_hash is not None else existing.get("memory_hash"),
+            "pending_digest": pending_digest if pending_digest is not None else existing.get("pending_digest"),
+            "parent_id": (parent_id or None) if parent_id is not None else existing.get("parent_id"),
+            "delegate_guide": bool(delegate_guide) if delegate_guide is not None else bool(existing.get("delegate_guide")),
+            "agent_backend": agent_backend or existing.get("agent_backend"),
+            "gateway_session": gateway_session if gateway_session is not None else existing.get("gateway_session"),
+            "native": native if native is not None else existing.get("native"),
+            "messages": messages,
+        }
+        # Atomic replace: readers (chat list, parallel chats) never see a
+        # half-written file.
+        tmp_file = chat_dir / "chat.json.tmp"
+        tmp_file.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp_file, chat_file)
 
 
 def _load_chat(chat_id: str) -> Optional[dict]:
@@ -592,7 +597,9 @@ def _model_attachment_error(model_id, attachments, label="The selected model") -
 
 @app.route("/")
 def index():
-    return send_from_directory(str(STATIC_DIR), "index.html")
+    page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    page = page.replace("</head>", f'<meta name="api-token" content="{_API_TOKEN}">\n</head>', 1)
+    return page, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
 
 
 # ---------- API routes ----------
@@ -789,6 +796,9 @@ def _accounts_load() -> dict:
                     continue
                 stored_cookie = str(record.get("cookie") or "")
                 record["cookie"] = crypto.decode_cookie(stored_cookie)
+                if not record["cookie"] and stored_cookie:
+                    # Preserve unreadable ciphertext at rest, never use it as a cookie.
+                    record["_protected_cookie"] = stored_cookie
                 if (record["cookie"] and crypto.DPAPI_AVAILABLE
                         and not crypto.is_protected(stored_cookie)):
                     needs_migration = True
@@ -805,17 +815,21 @@ def _accounts_save(store: dict):
         ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
         disk_store = copy.deepcopy(store)
         for record in disk_store.get("accounts") or []:
-            if isinstance(record, dict) and record.get("cookie"):
-                try:
-                    record["cookie"] = crypto.protect_text(str(record["cookie"]))
-                except Exception:
-                    # A DPAPI failure must not lose a verified sign-in.  The
-                    # exception text is safe, but never log the cookie itself.
-                    LOG.warning("account cookie could not be DPAPI-protected", exc_info=True)
-        ACCOUNTS_FILE.write_text(
-            json.dumps(disk_store, ensure_ascii=False, indent=1), encoding="utf-8")
+            if not isinstance(record, dict):
+                continue
+            protected = record.pop("_protected_cookie", None)
+            if record.get("cookie"):
+                # Fail closed: never fall back to writing plaintext on Windows.
+                record["cookie"] = crypto.protect_text(str(record["cookie"]))
+            elif protected:
+                record["cookie"] = protected
+        temp = ACCOUNTS_FILE.with_suffix(".tmp")
+        temp.write_text(json.dumps(disk_store, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(temp, ACCOUNTS_FILE)
+        return True
     except Exception:
         LOG.exception("accounts store save failed")
+        return False
 
 
 def _account_public(record: dict, current_id) -> dict:
@@ -874,7 +888,8 @@ def _register_account(user: dict, cookie: str) -> Optional[str]:
             "cookie": cookie, "updated_at": now, "expired": False,
         })
         store["current"] = account_id
-        _accounts_save(store)
+        if not _accounts_save(store):
+            return None
     return account_id
 
 
@@ -1063,7 +1078,11 @@ def _activate_cookie(cookie_str: str, method: str):
         user, err = candidate.get_me()
     if not user:
         return jsonify({"ok": False, "error": f"arena.ai rejected this session ({err}). Sign in on arena.ai again, then copy fresh cookies."}), False
-    _write_cookie_file(candidate.cookie_str)
+    try:
+        _write_cookie_file(candidate.cookie_str)
+    except Exception:
+        LOG.exception("Could not protect the session cookie")
+        return jsonify({"ok": False, "error": "Could not securely save the session cookie."}), False
     _client = candidate
     _me_cache.update(t=time.time(), user=user, err=None)
     _register_account(user, candidate.cookie_str)
@@ -1304,13 +1323,24 @@ def api_account_remove():
     return jsonify({"ok": True, "accounts": _accounts_public()})
 
 
+_SETTINGS_ALLOWLIST = frozenset({
+    "theme", "font_size", "show_welcome", "auto_scroll", "send_on_enter",
+    "workspace_dir", "default_mode", "default_modality", "model_a", "model_b",
+    "sidebar_collapsed", "sound", "notifications", "check_updates", "permission_mode",
+    "gateway_enabled", "gateway_auto", "gateway_servers", "gateway_workspace",
+    "update_check", "beta_updates", "elo_enabled", "auto_continue", "notify_sound",
+    "pacing", "pacing_preset", "cheap_subagents", "multi_session_subagents",
+    "account_failover", "tray_enabled", "layout", "arena_connectors_off",
+    "memory_enabled", "persona", "show_reasoning", "auto_copy", "max_history", "browser",
+})
+
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
     if request.method == "GET":
         return jsonify(load_config())
     data = request.get_json(silent=True) or {}
     cfg = load_config()
-    cfg.update(data)
+    cfg.update({key: value for key, value in data.items() if key in _SETTINGS_ALLOWLIST})
     save_config(cfg)
     return jsonify({"ok": True})
 
@@ -1338,7 +1368,7 @@ def api_gateway():
     workspace_root = _chosen_ws()
     return jsonify({
         "enabled": _gateway_enabled(cfg),
-        "auto": cfg.get("gateway_auto") is True,
+        "auto": cfg.get("gateway_auto") is not False,
         "chosen": cfg.get("gateway_servers") if isinstance(cfg.get("gateway_servers"), list) else None,
         "available": available,
         "workspace": {
@@ -1360,7 +1390,9 @@ def api_gateway_start():
     if not servers:
         return jsonify({"error": "Nothing to expose: enable a local MCP server under Connectors (Local MCP) or pick a Workspace folder first.",
                         "code": "no_servers"}), 400
-    status = _gateway().start(servers, wait_seconds=45)
+    status = _gateway().start(servers, wait_seconds=65)
+    if status["state"] == "starting":
+        return jsonify({"ok": True, "session": status}), 202
     if status["state"] == "needs_cloudflared":
         return jsonify({"error": "cloudflared is not installed", "code": "cloudflared_missing",
                         "session": status}), 409
@@ -1372,12 +1404,16 @@ def api_gateway_start():
 
 @app.route("/api/gateway/stop", methods=["POST"])
 def api_gateway_stop():
+    _NATIVE_SUBAGENTS.cancel_all()
+    with _SUBAGENT_CONTEXTS_LOCK:
+        _SUBAGENT_CONTEXTS.clear()
     return jsonify({"ok": True, "session": _gateway().stop("stopped")})
 
 
 @app.route("/api/components")
 def api_components():
-    payload = {"components": components.detect()}
+    refresh = request.args.get("refresh") in ("1", "true")
+    payload = {"components": components.detect(refresh=refresh)}
     payload.update(components.install_status())
     return jsonify(payload)
 
@@ -1491,6 +1527,67 @@ def api_chat_load(chat_id):
     client.eval_id = data.get("eval_id")
     data = dict(data, history_chars=_history_chars(data.get("messages") or []))
     return jsonify(data)
+
+
+@app.route("/api/chats/<chat_id>/webdev-recheck", methods=["POST"])
+def api_chat_webdev_recheck(chat_id):
+    data = _load_chat(chat_id)
+    if not data:
+        return jsonify({"error": "Chat not found"}), 404
+    store = _accounts_load()
+    if not _chat_visible(data, store.get("current"), _first_account_id(store)):
+        return jsonify({"error": "Chat not found"}), 404
+    if _chat_generating(chat_id):
+        return jsonify({"ok": False, "code": "busy"}), 409
+    if data.get("modality") != "code":
+        return jsonify({"ok": True, "previews": []})
+    messages = data.get("messages") or []
+    client = get_client()
+    found = []
+    # Recheck only the latest assistant turn; older turns are already stored.
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        ids = message.get("arena_message_ids") or {}
+        artifacts = message.setdefault("artifacts", [])
+        for lane, mid in ids.items():
+            if lane not in ("a", "b") or any(x.get("lane", "a") == lane and x.get("url") for x in artifacts if isinstance(x, dict)):
+                continue
+            try:
+                url = _webdev_metadata(client, mid)
+                conv = {"preview_artifacts": artifacts}
+                if url and _record_preview(conv, lane, url):
+                    found.append({"msg_index": index, "lane": lane, "url": url})
+            except Exception:
+                LOG.debug("webdev preview recheck failed", exc_info=True)
+        break
+    # The network lookup can overlap a new send or another local save. Re-read
+    # under the same lock as chat writes and match by Arena message ID, never
+    # write the stale pre-request snapshot back over newer user messages.
+    saved = []
+    if found:
+        with _chat_setup_lock, _chat_file_lock:
+            current_store = _accounts_load()
+            latest = _load_chat(chat_id)
+            if (latest and not _chat_generating(chat_id)
+                    and _chat_visible(latest, current_store.get("current"), _first_account_id(current_store))):
+                latest_messages = latest.get("messages") or []
+                for preview in found:
+                    original = messages[preview["msg_index"]]
+                    mid = (original.get("arena_message_ids") or {}).get(preview["lane"])
+                    for index, message in enumerate(latest_messages):
+                        if (isinstance(message, dict) and message.get("role") == "assistant"
+                                and (message.get("arena_message_ids") or {}).get(preview["lane"]) == mid):
+                            artifacts = message.setdefault("artifacts", [])
+                            if _record_preview({"preview_artifacts": artifacts}, preview["lane"], preview["url"]):
+                                saved.append(dict(preview, msg_index=index))
+                            break
+                if saved:
+                    _save_chat(chat_id, latest.get("title") or "Chat", latest_messages,
+                               mode=latest.get("mode") or "direct", modality=latest.get("modality") or "code",
+                               model_a=latest.get("model_a"), model_b=latest.get("model_b"), eval_id=latest.get("eval_id"))
+    return jsonify({"ok": True, "previews": saved})
 
 
 @app.route("/api/chats/<chat_id>/refresh", methods=["POST"])
@@ -1722,7 +1819,9 @@ def api_update_check():
 def _settings_bundle() -> dict:
     """Everything Settings export carries: config, memory files, MCP config.
     Account cookies are never part of it."""
-    bundle = {"app": "Arena Desktop", "version": 1, "config": load_config(),
+    cfg = load_config()
+    bundle = {"app": "Arena Desktop", "version": 1,
+              "config": {key: value for key, value in cfg.items() if key in _SETTINGS_ALLOWLIST},
               "memory_global": _read_memory_file(GLOBAL_MEMORY_FILE, 100_000)}
     folder = _chosen_ws()
     bundle["memory_workspace"] = (
@@ -1756,7 +1855,7 @@ def api_settings_import():
         return jsonify({"error": f"Could not back up the current settings first: {e}",
                         "code": "backup_failed"}), 500
     cfg = load_config()
-    cfg.update(data["config"])
+    cfg.update({key: value for key, value in data["config"].items() if key in _SETTINGS_ALLOWLIST})
     save_config(cfg)
     try:
         if isinstance(data.get("memory_global"), str):
@@ -2748,7 +2847,8 @@ def _run_automation(item):
     _tl.chat_id = chat_id
     _tl.stop_event = threading.Event()
     _tl.error = None
-    _tl.perm_override = item.get("permission") or "plan"
+    # Old saved schedules may request bypass; unattended work is always read-only.
+    _tl.perm_override = "plan"
     model_id = str(item.get("model") or "") or None
     conv = {"eval_id": None, "new": True, "mode": contracts.api_mode("direct"),
             "modality": contracts.api_modality("text"), "model_a": model_id,
@@ -2857,7 +2957,8 @@ def _start_automation_scheduler():
 
 @app.route("/api/automations")
 def api_automations_list():
-    return jsonify({"items": load_config().get("automations") or []})
+    items = load_config().get("automations") or []
+    return jsonify({"items": [dict(item, permission="plan") for item in items if isinstance(item, dict)]})
 
 
 @app.route("/api/automations", methods=["POST"])
@@ -2871,7 +2972,7 @@ def api_automations_save():
     if not _SCHEDULE_RE.match(schedule):
         return jsonify({"error": "Schedule must be 'daily HH:MM', 'hourly' or 'every Nm'.",
                         "code": "bad_request"}), 400
-    permission = body.get("permission") if body.get("permission") in ("plan", "bypassPermissions") else "plan"
+    permission = "plan"  # no unattended write or shell permissions
     cfg = load_config()
     items = list(cfg.get("automations") or [])
     aid = str(body.get("id") or "") or generate_uuidv7()
@@ -3187,11 +3288,14 @@ def api_chat_vote(chat_id):
 # ---------- arena.ai account history (cloud chats) ----------
 
 def _arena_get_json(path: str, timeout: float = 30, method: str = "GET"):
-    """Request one Arena API resource through the signed-in engine when present."""
+    return _arena_get_json_with_client(get_client(), path, timeout=timeout, method=method)
+
+
+def _arena_get_json_with_client(client, path: str, timeout: float = 30, method: str = "GET"):
+    """Use this turn's account, never another account's browser session."""
     method = str(method or "GET").upper()
-    client = get_client()
     detail = None
-    if _engine_on():
+    if _client_uses_engine(client):
         if not ENGINE.ready():
             return None, ("arena.ai is waiting for a check" if ENGINE.challenge
                           else "arena.ai session is still loading"), 0
@@ -3571,6 +3675,51 @@ def _save_webdev(lane: str, files: list, conv: dict):
                 "files": plan["files"], "preview": _preview_url(root) if saved else None})
 
 
+def _record_preview(conv, lane, url):
+    if not isinstance(url, str):
+        return False
+    parts = urlparse(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False
+    saved = conv.setdefault("preview_artifacts", [])
+    if any(item.get("url") == url and item.get("lane") == lane for item in saved):
+        return False
+    saved.append({"kind": "preview", "lane": lane, "url": url,
+                  "name": "Deployed preview", "title": "Deployed preview"})
+    return True
+
+
+def _webdev_metadata(client, message_id):
+    if not _validate_chat_id(str(message_id or "")):
+        return None
+    payload, error, status = _arena_get_json_with_client(
+        client, f"/api/evaluation/webdev/{message_id}", timeout=5)
+    if error or status != 200:
+        return None
+    return contracts.find_preview_url(payload)
+
+
+def _collect_webdev_previews(client, conv):
+    """A bounded post-stream check; failures never block saving the answer."""
+    pending = dict(conv.get("last_arena_ids") or {})
+    pending = {lane: mid for lane, mid in pending.items() if lane in ("a", "b") and mid}
+    for attempt in range(3):
+        if not pending or _stopped():
+            break
+        for lane, mid in list(pending.items()):
+            try:
+                url = _webdev_metadata(client, mid)
+            except Exception:
+                url = None
+            if url:
+                if _record_preview(conv, lane, url):
+                    yield _sse({"type": "preview", "model": lane, "url": url})
+                pending.pop(lane, None)
+        if pending and attempt < 2:
+            yield _sse({"type": "ping"})
+            time.sleep(1)
+
+
 def _webdev_event(lane: str, item: dict, conv: dict):
     event = item.get("event")
     if event == "title" and isinstance(item.get("title"), str):
@@ -3582,6 +3731,8 @@ def _webdev_event(lane: str, item: dict, conv: dict):
         yield from _save_webdev(lane, files, conv)
     url = contracts.find_preview_url(item)
     if event == "preview-ready" or url:
+        if url:
+            _record_preview(conv, lane, url)
         yield _sse({"type": "preview", "model": lane, "url": url, "status": item.get("status"),
                     "message": item.get("message") or item.get("reason")})
 
@@ -3751,6 +3902,7 @@ def _sandbox_result(lane: str, res: dict, conv: dict):
     url = contracts.find_preview_url(out)
     if url and url not in conv.setdefault("previews", set()):
         conv["previews"].add(url)
+        _record_preview(conv, lane, url)
         yield _sse({"type": "preview", "model": lane, "url": url})
 
 
@@ -3827,6 +3979,7 @@ def _line_events(r, conv: dict):
                     yield from _save_media(m, lane, conv)
                 url = contracts.find_preview_url(value)
                 if url:
+                    _record_preview(conv, lane, url)
                     yield _sse({"type": "preview", "model": lane, "url": url})
 
     def _chunks():
@@ -4284,6 +4437,7 @@ def _failover_seed(conv, content: str) -> str:
 # Master opt-in (gateway_enabled, default OFF) + separate auto-start
 # opt-in (gateway_auto) tied to the composer Workspace Sync tools flag.
 _GATEWAY = None
+_GATEWAY_INIT_LOCK = threading.Lock()
 
 
 _GATEWAY_WORKSPACE_SERVER = "workspace"
@@ -4308,6 +4462,182 @@ _GATEWAY_WORKSPACE_TOOLS = {
     "run_cmd": (False, "Run a shell command with the workspace folder as the working directory.",
                 {"cmd": "the command line to run"}),
 }
+
+
+# Parent handoff capabilities are memory-only and never stored in the chat.
+_SUBAGENT_CONTEXTS = {}
+_SUBAGENT_CONTEXTS_LOCK = threading.Lock()
+
+
+def _subagent_index():
+    schema = {"type": "object", "properties": {
+        "handle": {"type": "string", "description": "Private parent handoff handle"},
+        "task_path": {"type": "string", "description": "Workspace-relative task file (start only)"}},
+        "required": ["handle"]}
+    return {"tools": {name: {"alias": "__subagents__" + name,
+                              "description": desc, "input_schema": schema,
+                              "read_only": True} for name, desc in (
+        ("start", "Start one asynchronous Arena Agent from a workspace task file."),
+        ("status", "List your child states and result file paths."),
+        ("cancel", "Cancel all your running child agents."))}}
+
+
+def _register_subagent_context(parent_id, client, timezone):
+    root = _chosen_ws()
+    if root is None:
+        return ""
+    handle = secrets.token_urlsafe(32)
+    context = {"parent": str(parent_id), "client": client, "root": Path(root).resolve(),
+               "timezone": timezone, "mode": _perm_mode(),
+               "parent_stop": _chat_stop_event(parent_id)}
+    with _SUBAGENT_CONTEXTS_LOCK:
+        for key in [key for key, ctx in _SUBAGENT_CONTEXTS.items() if ctx["parent"] == str(parent_id)]:
+            del _SUBAGENT_CONTEXTS[key]
+        _SUBAGENT_CONTEXTS[handle] = context
+    return handle
+
+
+def _subagent_control(operation, args):
+    args = args if isinstance(args, dict) else {}
+    handle = str(args.get("handle") or "")
+    with _SUBAGENT_CONTEXTS_LOCK:
+        context = _SUBAGENT_CONTEXTS.get(handle)
+    if not context:
+        raise PermissionError("Invalid or expired sub-agent handle")
+    parent = context["parent"]
+    if operation == "start":
+        if context["mode"] == "plan":
+            raise PermissionError("Sub-agent file bridge requires an editable permission mode")
+        if context["parent_stop"].is_set():
+            raise RuntimeError("Parent chat was stopped")
+        path = str(args.get("task_path") or "")
+        local = agent.LocalTools(context["root"])
+        file, inside = local.resolve(path)
+        if not path or not inside or not file.is_file() or file.stat().st_size > 65536:
+            raise ValueError("Provide a workspace task file of at most 64 KiB")
+        return json.dumps(_NATIVE_SUBAGENTS.launch(parent, path, context))
+    if operation == "status":
+        return json.dumps({"children": _NATIVE_SUBAGENTS.status(parent)})
+    if operation == "cancel":
+        return json.dumps({"cancelled": _NATIVE_SUBAGENTS.cancel_parent(parent)})
+    raise ValueError("Unknown sub-agent operation")
+
+
+def _subagent_guide(handle):
+    return ("[Arena Desktop sub-agents]\n"
+            "You may launch up to six native Arena Agent children in parallel while you continue working. "
+            "Coordinate only through workspace files: write a focused task file using the workspace gateway; "
+            "call the subagents server start tool with task_path and the handle below. It returns immediately. "
+            "Use status with the handle to obtain child state and result_path, then read the result file with "
+            "the workspace gateway. Give children non-overlapping files and review changes. "
+            "Children have their own gateway and inherit your permission mode. Never print the handle.\n"
+            f"Private handle: {handle}\n")
+
+
+class _CombinedStop:
+    def __init__(self, a, b):
+        self.a, self.b = a, b
+    def is_set(self):
+        return self.a.is_set() or self.b.is_set()
+
+
+def _run_native_child(child_id, task_path, context, cancel):
+    root, parent = context["root"], context["parent"]
+    local = agent.LocalTools(root)
+    file, inside = local.resolve(task_path)
+    if not inside or not file.is_file() or file.stat().st_size > 65536:
+        raise ValueError("Invalid task file")
+    task = file.read_text(encoding="utf-8")
+    if not task.strip():
+        raise ValueError("Empty task file")
+    combined = _CombinedStop(cancel, context["parent_stop"])
+    _tl.stop_event, _tl.chat_id, _tl.perm_override = combined, parent, context["mode"]
+    _generation_started(child_id)
+    mgr = None
+    child_pairing = None
+    result = {"text": "", "reasoning": "", "tools": [], "files": [], "native": None, "error": None}
+    history = [{"role": "user", "text": f"Task file: {task_path}\n\n{task}"}]
+    title = "Sub-agent: " + " ".join(task.split())[:44]
+    try:
+        _save_chat(child_id, title, history, mode="agent", modality="text",
+                   parent_id=parent, agent_backend="arena")
+        def child_index():
+            index = _gateway_tool_index()
+            index.pop("subagents", None)
+            index.update(_gateway_workspace_index())
+            return index
+        def child_call(alias, arguments):
+            if str(alias).startswith(_GATEWAY_WORKSPACE_ALIAS):
+                return _gateway_workspace_call(str(alias)[len(_GATEWAY_WORKSPACE_ALIAS):], arguments, root=root)
+            return CONNECTORS.call(alias, arguments)
+        def child_approve(server, tool, read_only, arguments):
+            _tl.perm_override = context["mode"]
+            _tl.chat_id = parent
+            try:
+                return _gateway_approve(server, tool, read_only, arguments)
+            finally:
+                _tl.perm_override = None
+                _tl.chat_id = None
+        mgr = GatewayManager(tool_index=child_index, call_tool=child_call, approve=child_approve,
+                             cloudflared_path=components.cloudflared_path, logger=LOG)
+        servers = [x for x in _gateway_servers() if x != "subagents"]
+        status = mgr.start(servers, wait_seconds=0)
+        startup_deadline = time.monotonic() + 70
+        while status.get("state") == "starting" and not combined.is_set() and time.monotonic() < startup_deadline:
+            status = mgr.start(servers, wait_seconds=1)
+        if combined.is_set():
+            return ""
+        if status.get("state") != "on":
+            raise RuntimeError("Child gateway unavailable")
+        child_pairing = status.get("pairing")
+        prefix = mgr.injection_block()
+        prompt = (prefix + "\n[Sub-agent task] Work on this task only, avoid conflicting edits, "
+                  "and finish with a concise report including changed files and tests.\n" + task)
+        gen = _native_agent_run(context["client"], prompt, {}, context["timezone"], result=result)
+        # Keep driving the generator on cancellation so it can send the
+        # native STOP request instead of merely abandoning the HTTP stream.
+        for _ in gen:
+            pass
+        if combined.is_set():
+            return ""
+        if result.get("error"):
+            raise RuntimeError("Arena child session failed")
+        reply = str(result.get("text") or "")
+        if not reply.strip():
+            raise RuntimeError("Arena child produced no report")
+        if status.get("pairing"):
+            reply = reply.replace(status["pairing"], "[redacted]")
+        relative = f".arena-bridge/{child_id}.result.txt"
+        if not _gateway_approve("workspace", "write_file", False, {"path": relative}):
+            raise PermissionError("Result file not approved")
+        _gateway_workspace_call("write_file", {"path": relative, "content": reply}, root=root)
+        return relative
+    finally:
+        if mgr is not None:
+            mgr.stop()
+        safe_text = str(result.get("text") or "")
+        if child_pairing:
+            safe_text = safe_text.replace(child_pairing, "[redacted]")
+        response = {"role": "assistant", "text": safe_text, "text_b": "",
+                    "names": {"a": "Agent", "b": None}}
+        history.append(response)
+        native = result.get("native") or {}
+        _save_chat(child_id, title, history, mode="agent", modality="text", parent_id=parent,
+                   agent_backend="arena", native=native, eval_id=native.get("session_id"))
+        _generation_finished(child_id)
+        _tl.stop_event = _tl.chat_id = _tl.perm_override = None
+
+
+_NATIVE_SUBAGENTS = NativeSubagentPool(_run_native_child, limit=6)
+
+
+@app.route("/api/chats/<chat_id>/native-subagents", methods=["GET", "DELETE"])
+def api_native_subagents(chat_id):
+    if not _validate_chat_id(chat_id) or not _load_chat(chat_id):
+        return jsonify({"error": "Chat not found"}), 404
+    if request.method == "DELETE":
+        return jsonify({"cancelled": _NATIVE_SUBAGENTS.cancel_parent(chat_id)})
+    return jsonify({"children": _NATIVE_SUBAGENTS.status(chat_id)})
 
 
 def _gateway_workspace_on(cfg=None) -> bool:
@@ -4355,11 +4685,12 @@ def _gateway_tool_index() -> dict:
     # gets the same file tools the local agent has, confined to that folder.
     if _chosen_ws() is not None:
         index.update(_gateway_workspace_index())
+        index["subagents"] = _subagent_index()
     return index
 
 
-def _gateway_workspace_call(tool: str, arguments) -> str:
-    root = _chosen_ws()
+def _gateway_workspace_call(tool: str, arguments, root=None) -> str:
+    root = root or _chosen_ws()
     if root is None:
         raise ValueError("No workspace folder is picked in Arena Desktop.")
     args = dict(arguments or {})
@@ -4376,6 +4707,8 @@ def _gateway_workspace_call(tool: str, arguments) -> str:
 
 
 def _gateway_call_tool(alias: str, arguments) -> str:
+    if str(alias).startswith("__subagents__"):
+        return _subagent_control(str(alias)[len("__subagents__"):], arguments)
     if str(alias).startswith(_GATEWAY_WORKSPACE_ALIAS):
         return _gateway_workspace_call(str(alias)[len(_GATEWAY_WORKSPACE_ALIAS):], arguments)
     return CONNECTORS.call(alias, arguments)
@@ -4387,6 +4720,8 @@ def _gateway_approve(server, tool, read_only, arguments) -> bool:
     # Workspace calls grade under their real local tool names, so e.g.
     # Accept-edits covers write_file/edit_file but still prompts for delete.
     arguments = arguments or {}
+    if server == "subagents":
+        return True  # capability is checked inside _subagent_control
     command = ""
     if server == _GATEWAY_WORKSPACE_SERVER and tool in permissions.KIND:
         permission_tool = tool
@@ -4400,7 +4735,7 @@ def _gateway_approve(server, tool, read_only, arguments) -> bool:
     verdict = BROKER.check(_perm_mode(), permission_tool, inside=True, command=command)
     if verdict == "allow":
         return True
-    if verdict == "blocked":
+    if verdict in ("deny", "blocked"):
         return False
     info = {"tool": permission_tool, "summary": summary,
             "gateway": True, "server": server, "mcp_tool": tool, "inside": True,
@@ -4412,19 +4747,20 @@ def _gateway_approve(server, tool, read_only, arguments) -> bool:
 
 def _gateway():
     global _GATEWAY
-    if _GATEWAY is None:
-        _GATEWAY = GatewayManager(
-            tool_index=_gateway_tool_index,
-            call_tool=_gateway_call_tool,
-            approve=_gateway_approve,
-            cloudflared_path=components.cloudflared_path,
-            logger=LOG)
-    return _GATEWAY
+    with _GATEWAY_INIT_LOCK:
+        if _GATEWAY is None:
+            _GATEWAY = GatewayManager(
+                tool_index=_gateway_tool_index,
+                call_tool=_gateway_call_tool,
+                approve=_gateway_approve,
+                cloudflared_path=components.cloudflared_path,
+                logger=LOG)
+        return _GATEWAY
 
 
 def _gateway_enabled(cfg=None) -> bool:
     try:
-        return (cfg or load_config()).get("gateway_enabled") is True
+        return (cfg if cfg is not None else load_config()).get("gateway_enabled") is not False
     except Exception:
         return False
 
@@ -4446,6 +4782,8 @@ def _gateway_servers(cfg=None) -> list:
     if (_gateway_workspace_on(cfg) and _chosen_ws() is not None
             and _GATEWAY_WORKSPACE_SERVER not in servers):
         servers.append(_GATEWAY_WORKSPACE_SERVER)
+    if _GATEWAY_WORKSPACE_SERVER in servers and "subagents" not in servers:
+        servers.append("subagents")
     return servers
 
 
@@ -4472,7 +4810,7 @@ def _gateway_injection(data, cfg=None) -> str:
     the previous one was stopped or expired (v5.6.1: also on continued
     chats, not only new ones)."""
     cfg = cfg or load_config()
-    if not _gateway_enabled(cfg) or cfg.get("gateway_auto") is not True:
+    if not _gateway_enabled(cfg) or cfg.get("gateway_auto") is False:
         return ""
     if (data or {}).get("tools") is False:
         LOG.info("gateway: auto-start skipped (Workspace Sync is off for this send)")
@@ -4484,7 +4822,7 @@ def _gateway_injection(data, cfg=None) -> str:
         return ""
     mgr = _gateway()
     if mgr.summary()["state"] != "on":
-        status = mgr.start(servers, wait_seconds=20)
+        status = mgr.start(servers, wait_seconds=70)
         if status.get("state") != "on":
             LOG.info("gateway: auto-start did not come up (state=%s, error=%s)",
                      status.get("state"), status.get("error"))
@@ -5271,6 +5609,8 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
     tool_entries: dict = {}
     tool_inputs: dict = {}
     pending_hitl: list = []
+    unresolved_questions: dict = {}
+    answered_questions: set = set()
     current_message_id = None
     current_node_id = None
     hitl_pause = {"since": None, "now": False}
@@ -5286,8 +5626,26 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
     deadline = time.monotonic() + 1800
     cycles = 0
 
+    def promote_unresolved_questions():
+        # Native ask_user may stop at input-available without emitting the
+        # awaiting_user_response tool output. Promote only at a stream/step
+        # boundary, so an actual result in the same step wins.
+        for call_id, pending in list(unresolved_questions.items()):
+            if call_id in answered_questions or any(p.get("tool_call_id") == call_id for p in pending_hitl):
+                continue
+            pending["entry"]["status"] = "waiting"
+            pending_hitl.append(pending)
+        unresolved_questions.clear()
+
     def stream_should_stop():
         if _stopped() or hitl_pause.get("now"):
+            return True
+        # Some Arena sessions keep the subscription open without a finish
+        # event or tool output. Do not leave an input-only question spinning
+        # forever; first allow a brief window for a normal result to arrive.
+        if any(time.monotonic() - item.get("seen_at", time.monotonic()) >= 3
+               for item in unresolved_questions.values()):
+            promote_unresolved_questions()
             return True
         since = hitl_pause.get("since")
         # Give records that are already queued for the same model step a
@@ -5378,6 +5736,8 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
             return False
 
         for pending in batch:
+            if pending.get("tool") == "ask_user":
+                answered_questions.add(pending.get("tool_call_id"))
             entry = pending.get("entry") if isinstance(pending.get("entry"), dict) else {}
             entry.update({"ok": True, "status": "ok"})
             if pending.get("tool") == "ask_user":
@@ -5476,7 +5836,7 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
                     current_message_id = message_id
                 if node_id:
                     current_node_id = node_id
-                    for pending in pending_hitl:
+                    for pending in list(pending_hitl) + list(unresolved_questions.values()):
                         if pending.get("message_id") == current_message_id:
                             pending["request_node_id"] = node_id
                 if isinstance(chunk, dict) and chunk.get("type") == "tool-input-available":
@@ -5494,6 +5854,7 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
                     elif chunk_type and chunk_type not in ("message-metadata", "raw"):
                         turn_content_seen = True
                 if native_agent.is_turn_complete_record(record):
+                    promote_unresolved_questions()
                     if not turn_content_seen and not pending_hitl:
                         # A turn-complete replayed from before this turn's own
                         # records (rewound cursor): the new reply has not
@@ -5506,6 +5867,8 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
                     else:
                         turn_done = True
                     break
+                if isinstance(chunk, dict) and chunk.get("type") in ("finish-step", "finish"):
+                    promote_unresolved_questions()
                 if pending_hitl and isinstance(chunk, dict) and chunk.get("type") in ("finish-step", "finish"):
                     hitl_pause["now"] = True
                     break
@@ -5523,13 +5886,27 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
                         result["tools"].append(entry)
                         if event.get("id"):
                             tool_entries[event["id"]] = entry
+                            call_id = str(event["id"])
+                            if event.get("tool") == "ask_user" and call_id not in answered_questions:
+                                unresolved_questions[call_id] = {
+                                    "tool": "ask_user", "tool_call_id": call_id,
+                                    "input": copy.deepcopy(tool_inputs.get(call_id)),
+                                    "output": {}, "request_node_id": current_node_id or current_message_id,
+                                    "message_id": current_message_id, "entry": entry,
+                                    "chat_id": getattr(_tl, "chat_id", None),
+                                    "seen_at": time.monotonic(),
+                                }
                     elif event["type"] == "tool_result":
+                        unresolved_questions.pop(str(event.get("id") or ""), None)
                         entry = tool_entries.get(event.get("id") or "")
                         if entry is not None:
                             entry["ok"] = event["ok"]
                             entry["status"] = event["status"]
                     elif event["type"] == "hitl_wait":
                         call_id = str(event.get("tool_call_id") or event.get("id") or "")
+                        unresolved_questions.pop(call_id, None)
+                        if call_id in answered_questions or any(p.get("tool_call_id") == call_id for p in pending_hitl):
+                            continue
                         entry = tool_entries.get(call_id)
                         if entry is not None:
                             entry["status"] = "waiting"
@@ -5591,6 +5968,8 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
             resp.close()
         LOG.info("native stream: cycle %s version=%s settled=%s records=%s done=%s pending=%s",
                  cycles, version, settled, cycle_records, turn_done, len(pending_hitl))
+        if settled and unresolved_questions:
+            promote_unresolved_questions()
         if pending_hitl:
             answered = yield from process_pending_hitl()
             if not answered:
@@ -7452,6 +7831,7 @@ def _api_chat_impl():
         # coming back tomorrow) no longer strands the chat with dead
         # credentials. Only with both opt-ins and Workspace Sync on.
         gateway_key = existing.get("gateway_session") or ""
+        gateway_block = ""
         try:
             gateway_block = _gateway_injection(data)
             current_key = _gateway_session_key() if gateway_block else ""
@@ -7461,6 +7841,10 @@ def _api_chat_impl():
                 gateway_key = current_key
                 LOG.info("gateway: injected session block into %s native chat",
                          "new" if fresh_session else "continued")
+            if gateway_block and data.get("tools") is not False:
+                handle = _register_subagent_context(chat_id, client, tz)
+                if handle:
+                    native_prefix += _subagent_guide(handle) + "\n"
         except Exception:
             LOG.exception("gateway injection failed")
         native_message = native_prefix + message
@@ -7470,6 +7854,10 @@ def _api_chat_impl():
             yield _sse({"type": "meta", "dual": False, "mode": "agent", "modality": "text",
                         "chat_id": chat_id, "permission_mode": _perm_mode(),
                         "names": {"a": "Agent", "b": None}})
+            cfg = load_config()
+            if data.get("tools") is not False and _gateway_enabled(cfg) and cfg.get("gateway_auto") is not False and not gateway_block:
+                yield _sse({"type": "notice", "model": "a", "text":
+                            "Gateway is not ready. The agent cannot access local tools or start sub-agents on this turn; check Settings → Gateway."})
             # The chat is persisted from the finally-block below, on EVERY
             # exit path (normal end, Stop, client disconnect): the native
             # session coordinates are published into `out` as they become
@@ -7643,6 +8031,8 @@ def _api_chat_impl():
         else:
             out = yield from _turn_auto(client, send, conv)
         out = out or {"a": "", "b": ""}
+        if modality == "webdev" and not _tl.error:
+            yield from _collect_webdev_previews(client, conv)
         # conv carries this chat's own Arena session id; the shared client
         # Field is not used, so parallel chats cannot cross their sessions.
         clean = agent.strip_tool_calls if (tools_on or fanout_models) else str
@@ -7660,10 +8050,12 @@ def _api_chat_impl():
             reply["checkpoints"] = ckpts
         if conv.get("sandbox"):
             reply["sandbox"] = conv["sandbox"]
-        if dual:
+        if dual or modality == "webdev":
             arena_ids = conv.get("last_arena_ids") or {}
-            if arena_ids.get("a") and arena_ids.get("b"):
+            if arena_ids.get("a") and (not dual or arena_ids.get("b")):
                 reply["arena_message_ids"] = arena_ids
+        if conv.get("preview_artifacts"):
+            reply["artifacts"] = conv["preview_artifacts"]
         lane_errors = {key: list(values) for key, values in (conv.get("lane_errors") or {}).items() if values}
         if lane_errors:
             reply["lane_errors"] = lane_errors
@@ -7831,13 +8223,18 @@ def api_terminal():
     cmd = data.get("command", "").strip()
     if not cmd:
         return jsonify({"error": "No command"}), 400
+    if permissions.CATASTROPHIC.search(cmd):
+        return jsonify({"error": "This command is never allowed"}), 403
+    if re.search(r"(?:^|\s)(?:-c|-e|--eval|-enc|-encodedcommand)(?:\s|$)", cmd, re.I):
+        return jsonify({"error": "Inline code execution flags are blocked"}), 403
     blocked = ["format", "del /s", "rd /s", "rmdir /s", "rm -rf /"]
     for b in blocked:
         if b in cmd.lower():
             return jsonify({"error": f"Blocked: {b}"}), 403
     try:
         result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True,
+            (["cmd.exe", "/d", "/s", "/c", cmd] if sys.platform == "win32" else ["/bin/sh", "-lc", cmd]),
+            shell=False, capture_output=True, text=True,
             timeout=30, cwd=str(Path.home()),
         )
         return jsonify({
@@ -7858,6 +8255,13 @@ def _local_same_origin_only():
     """Only this app's own page may drive the API: blocks other sites, DNS rebinding and generated previews."""
     if request.host.rsplit(":", 1)[0] not in ("127.0.0.1", "localhost"):
         return jsonify({"error": "Unknown host"}), 403
+    if request.path.startswith("/api/"):
+        token = request.headers.get("X-Arena-Token") or ""
+        instance = request.headers.get("X-Arena-Instance-Token") or ""
+        handoff = (request.path == "/api/deep-link" and request.method == "POST" and INSTANCE_TOKEN
+                   and hmac.compare_digest(instance, str(INSTANCE_TOKEN)))
+        if not handoff and not hmac.compare_digest(token, _API_TOKEN):
+            return jsonify({"error": "Missing or invalid API token"}), 403
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return None
     origin = request.headers.get("Origin")
@@ -7924,7 +8328,7 @@ def api_stop():
     if chat_id:
         # Stop only this chat; other chats keep working.
         _chat_stop_event(str(chat_id)).set()
-        cancelled = 0
+        cancelled = _NATIVE_SUBAGENTS.cancel_parent(str(chat_id))
     else:
         _stop.set()
         cancelled = BROKER.cancel_all()

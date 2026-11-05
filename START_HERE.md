@@ -1,4 +1,4 @@
-# Arena Desktop v5.7.0 - Start Here
+# Arena Desktop v5.8.1 - Start Here
 
 Arena Desktop is an unofficial Windows client for arena.ai. It is not affiliated with or endorsed by Arena AI Inc.
 
@@ -57,6 +57,7 @@ The local session in `%USERPROFILE%\.arena-personal\cookies.txt` is protected wi
 ## Limits
 
 - Arena controls model availability, work types, quotas, and rate limits for the signed-in account. Rate limits can be per work type (Video is the strictest), per model, or a daily account cap; the app now shows Arena's own reset time. Video may also require an account of a minimum age.
+- Native Agent Workspace Sync needs cloudflared and a working Cloudflare Quick Tunnel. Native sub-agents share the same Workspace files, even though their gateways are separate. Arena quotas still apply; live sessions can fail or ask for approval.
 - Human checks are never solved automatically. Complete them manually in the Arena window.
 - A started chat keeps the mode, work type, and models it began with. Create a new chat to change them.
 - A local folder is not uploaded wholesale to Arena's remote sandbox; files and previews come from actual server events.
@@ -65,7 +66,7 @@ The local session in `%USERPROFILE%\.arena-personal\cookies.txt` is protected wi
 ## Build and test
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests
+.\.venv\Scripts\python.exe scripts/run_test_groups.py
 $env:RUN_BROWSER_TESTS='1'; .\.venv\Scripts\python.exe -m pytest -q tests/test_ui_browser.py
 .\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean arena-cli.spec
 .\.venv\Scripts\python.exe scripts/check_exe.py dist/Arena-Desktop.exe

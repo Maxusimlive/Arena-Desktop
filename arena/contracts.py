@@ -518,8 +518,26 @@ def sandbox_op(call: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def webdev_items(value: Any) -> List[Dict[str, Any]]:
-    items = value if isinstance(value, list) else [value]
-    return [i for i in items if isinstance(i, dict) and i.get("type") == "webdev"]
+    """Find webdev events in both the direct and nested Arena stream forms."""
+    found = []
+    def visit(item, depth=0):
+        if depth > 8:
+            return
+        if isinstance(item, list):
+            for child in item:
+                visit(child, depth + 1)
+        elif isinstance(item, dict):
+            if item.get("type") == "webdev":
+                inner = item.get("event")
+                if isinstance(inner, dict):
+                    found.append({**item, **inner, "type": "webdev"})
+                else:
+                    found.append(item)
+            else:
+                for child in item.values():
+                    visit(child, depth + 1)
+    visit(value)
+    return found
 
 
 _MEDIA_EXT = {"png": "image", "jpg": "image", "jpeg": "image", "webp": "image", "gif": "image", "avif": "image",

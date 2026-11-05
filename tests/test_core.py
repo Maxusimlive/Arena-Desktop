@@ -1137,7 +1137,7 @@ def test_workspace_panel_tree_and_file_are_scoped_to_panel_root(web):
     appmod, c, *_ = web
     root = workspace.PROJECTS_DIR
     (root / "src").mkdir(parents=True)
-    (root / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    (root / "src" / "app.py").write_bytes(b"print('ok')\n")
     (root / "README.md").write_text("# Demo\n", encoding="utf-8")
     (root / "blob.bin").write_bytes(b"a\x00b")
 
@@ -2827,8 +2827,11 @@ def test_shell_refusal_and_idle_kill(monkeypatch, tmp_path):
     from arena import agent as agent_mod
     monkeypatch.setattr(agent_mod, "SHELL_IDLE_LIMIT", 1)
     assert "not run" in agent_mod.run_shell_command("vim file.txt", tmp_path)
-    out = agent_mod.run_shell_command(
-        "python3 -c \"import time; time.sleep(30)\"", tmp_path)
+    (tmp_path / "sleep_test.py").write_text("import time; time.sleep(30)", encoding="utf-8")
+    import shlex
+    import subprocess
+    executable = subprocess.list2cmdline([sys.executable]) if sys.platform == "win32" else shlex.quote(sys.executable)
+    out = agent_mod.run_shell_command(f"{executable} sleep_test.py", tmp_path)
     assert "killed after 1s without output" in out
     assert agent_mod.run_shell_command("echo hi", tmp_path).endswith("hi")
 
@@ -3198,9 +3201,7 @@ def test_gateway_loopback_jobs_and_pairing():
 
 
 def test_gateway_slow_tunnel_probe_does_not_kill_session(tmp_path):
-    """Auto-start waits 20s while the health probe allows 40s of DNS lag:
-    a live cloudflared that already printed its URL must not be killed by
-    the shorter wait (regression: gateway silently never started)."""
+    """A live tunnel may continue starting but is not on before health succeeds."""
     import os
     import stat
     import sys
@@ -3221,9 +3222,9 @@ def test_gateway_slow_tunnel_probe_does_not_kill_session(tmp_path):
                          cloudflared_path=lambda: fake)
     try:
         status = mgr.start(["blender"], wait_seconds=2)
-        assert status["state"] == "on"
-        assert status["url"] == "https://fake-gateway-test.trycloudflare.com"
-        assert mgr.injection_block()  # the agent gets the session block
+        assert status["state"] == "starting"
+        assert "pairing" not in status
+        assert not mgr.injection_block()  # unverified tunnel is never advertised
     finally:
         mgr.stop()
 
@@ -3265,6 +3266,7 @@ def test_gateway_injection_gating(web, monkeypatch):
 
 def test_gateway_endpoints_require_optin(web):
     _appmod, c, _cfg, _use, _sent = web
+    _cfg["gateway_enabled"] = False
     body = c.get("/api/gateway").get_json()
     assert body["enabled"] is False and body["session"]["state"] == "off"
     assert c.post("/api/gateway/start", json={}).status_code == 403
@@ -3858,7 +3860,7 @@ def test_gateway_workspace_server_index_and_servers(web, monkeypatch, tmp_path):
     assert tools["write_file"]["read_only"] is False
     assert tools["ls"]["alias"] == "__workspace__ls"
     # Explicit MCP picks keep the folder unless its own toggle is off.
-    assert appmod._gateway_servers({"gateway_servers": ["blender"]}) == ["blender", "workspace"]
+    assert appmod._gateway_servers({"gateway_servers": ["blender"]}) == ["blender", "workspace", "subagents"]
     assert appmod._gateway_servers(
         {"gateway_servers": ["blender"], "gateway_workspace": False}) == ["blender"]
     monkeypatch.setattr(appmod, "_chosen_ws", lambda: None)
@@ -4005,3 +4007,170 @@ def test_native_add_voice_choice_sends_stats_without_image_reveal(web, monkeypat
     assert saved_choice["listen_seconds"] == [3.25, 1.5]
     assert all("model_name" not in item for item in saved_choice["candidates"])
     assert any(event["type"] == "media_choice_done" for event in collected)
+
+
+def test_native_ask_user_input_only_is_shown_answered_and_continued(web, monkeypatch):
+    first = _FakeStreamResp(_lines(
+        {"type": "start", "messageId": "assistant-1",
+         "messageMetadata": {"nodeId": "node-1"}},
+        {"type": "tool-input-available", "toolCallId": "q1",
+         "toolName": "arena__ask_user",
+         "input": {"questions": [{
+             "id": "color", "question": "Which color should I use?",
+             "options": [
+                 {"id": "red", "label": "Red", "description": "Warm"},
+                 {"id": "blue", "label": "Blue"}],
+             "allowCustomResponse": True,
+         }]}},
+        {"type": "finish-step"},
+    ))
+    second = _FakeStreamResp(_lines(
+        {"type": "text-delta", "delta": "Blue it is."},
+        {"type": "trigger:turn-complete"},
+        start_id=90,
+    ))
+    appmod, c, gen, result, appends = _native_hitl_setup(
+        web, monkeypatch, [first, second])
+
+    collected = []
+    question = None
+    for raw in gen:
+        event = _sse_events_from_raw([raw])[0]
+        collected.append(event)
+        if event["type"] == "question":
+            question = event
+            break
+    assert question and question["question"] == "Which color should I use?"
+    assert question["options"] == ["Red — Warm", "Blue"]
+    assert c.post(f"/api/questions/{question['id']}", json={"answer": "Blue"}).status_code == 200
+    collected.extend(_sse_events_from_raw(list(gen)))
+
+    assert result["text"] == "Blue it is."
+    assert result["error"] is None
+    assert len(appends) == 1
+    hitl_part = appends[0][1]["payload"]["message"]["parts"][0]
+    assert hitl_part["type"] == "data-tool-results"
+    assert hitl_part["data"] == [{
+        "requestNodeId": "node-1", "tool": "ask_user", "toolCallId": "q1",
+        "output": {"skipped": False, "answers": [{
+            "questionId": "color", "selectedOptionId": "blue",
+            "customResponse": None}]},
+    }]
+    tool_entry = result["tools"][0]
+    assert tool_entry["tool"] == "ask_user" and tool_entry["status"] == "ok"
+    assert tool_entry["question"] == "Which color should I use?"
+    assert tool_entry["answer"] == "Blue"
+    assert any(e["type"] == "tool_result" and e.get("id") == "q1" for e in collected)
+
+
+def test_native_ask_user_with_existing_result_does_not_prompt(web, monkeypatch):
+    first = _FakeStreamResp(_lines(
+        {"type": "start", "messageId": "assistant-1", "messageMetadata": {"nodeId": "node-1"}},
+        {"type": "tool-input-available", "toolCallId": "q1", "toolName": "arena__ask_user",
+         "input": {"questions": [{"id": "q", "question": "Already answered?", "options": []}]}},
+        {"type": "tool-output-available", "toolCallId": "q1", "output": {"skipped": True, "answers": []}},
+        {"type": "finish-step"}, {"type": "trigger:turn-complete"},
+    ))
+    appmod, c, gen, result, appends = _native_hitl_setup(web, monkeypatch, [first])
+    events = _sse_events_from_raw(list(gen))
+    assert not any(event["type"] == "question" for event in events)
+    assert not appends
+    assert result["tools"][0]["status"] == "ok"
+
+
+def test_gateway_preferences_use_settings_allowlist_and_export_is_filtered(web, monkeypatch):
+    appmod, c, cfg, *_ = web
+    cfg['session_secret'] = 'do-not-export'
+    response = c.post('/api/settings', json={
+        'gateway_enabled': True, 'gateway_auto': True,
+        'gateway_workspace': True, 'gateway_servers': ['workspace'],
+        'session_secret': 'must-not-overwrite',
+    })
+    assert response.status_code == 200
+    assert cfg['gateway_enabled'] is True and cfg['gateway_auto'] is True
+    assert cfg['session_secret'] == 'do-not-export'
+    exported = c.get('/api/settings/export').get_json()
+    assert exported['config']['gateway_enabled'] is True
+    assert 'session_secret' not in exported['config']
+    exported['config']['session_secret'] = 'malicious'
+    response = c.post('/api/settings/import', json=exported)
+    assert response.status_code == 200
+    assert cfg['session_secret'] == 'do-not-export'
+
+
+def test_gateway_never_prompts_to_override_a_denied_action(web, monkeypatch):
+    appmod, *_ = web
+    monkeypatch.setattr(appmod, '_perm_mode', lambda: 'plan')
+    monkeypatch.setattr(appmod.BROKER, 'ask', lambda *a, **k: (_ for _ in ()).throw(AssertionError('must not ask')))
+    assert appmod._gateway_approve('workspace', 'write_file', False, {'path': 'a.txt'}) is False
+    monkeypatch.setattr(appmod, '_perm_mode', lambda: 'auto')
+    assert appmod._gateway_approve('workspace', 'run_cmd', False, {'cmd': 'shutdown now'}) is False
+
+
+def test_native_subagents_use_distinct_gateways_and_file_bridge(web, monkeypatch, tmp_path):
+    appmod, *_ = web
+    monkeypatch.setattr(appmod, '_chosen_ws', lambda: tmp_path)
+    monkeypatch.setattr(appmod, '_perm_mode', lambda: 'auto')
+    monkeypatch.setattr(appmod, '_gateway_approve', lambda *a, **k: True)
+    monkeypatch.setattr(appmod, '_gateway_tool_index', lambda: {'workspace': appmod._gateway_workspace_index()['workspace']})
+    monkeypatch.setattr(appmod, '_gateway_servers', lambda *a: ['workspace', 'subagents'])
+    monkeypatch.setattr(appmod, '_save_chat', lambda *a, **k: None)
+    seen, stop_event = [], threading.Event()
+    class FakeGateway:
+        def __init__(self, **kw):
+            self.number = len(seen) + 1
+            seen.append(self)
+        def start(self, servers, wait_seconds):
+            assert servers == ['workspace']
+            return {'state': 'on', 'pairing': f'child-secret-{self.number}'}
+        def injection_block(self):
+            return f'gateway-{self.number} child-secret-{self.number}'
+        def stop(self):
+            pass
+    monkeypatch.setattr(appmod, 'GatewayManager', FakeGateway)
+    def native(client, prompt, existing, timezone, result):
+        result['text'] = 'report ' + prompt.split(' child-secret-')[1].split('\n')[0]
+        if False:
+            yield None
+        return result
+    monkeypatch.setattr(appmod, '_native_agent_run', native)
+    (tmp_path / 'task.txt').write_text('inspect tests', encoding='utf8')
+    context = {'parent': 'parent', 'root': tmp_path, 'client': object(), 'timezone': None,
+               'mode': 'auto', 'parent_stop': stop_event}
+    a = appmod._run_native_child('child-a', 'task.txt', context, threading.Event())
+    b = appmod._run_native_child('child-b', 'task.txt', context, threading.Event())
+    assert len(seen) == 2 and seen[0] is not seen[1]
+    assert a != b and (tmp_path / a).is_file() and (tmp_path / b).is_file()
+    assert 'inspect tests' not in str(appmod._NATIVE_SUBAGENTS.status('parent'))
+
+
+def test_native_input_only_question_does_not_wait_for_end_of_open_stream(web, monkeypatch):
+    import threading
+    first = _FakeStreamResp(_lines(
+        {"type": "start", "messageId": "a", "messageMetadata": {"nodeId": "n"}},
+        {"type": "tool-input-available", "toolCallId": "q", "toolName": "arena__ask_user",
+         "input": {"questions": [{"id": "q", "question": "Choose?", "options": [{"id": "yes", "label": "Yes"}]}]}},
+    ))
+    closed = threading.Event()
+    # Keep the server subscription open after the input event, as with a
+    # caught-up stream; never send finish-step or an output.
+    original = first.iter_lines
+    def open_iter(*args, **kwargs):
+        yield from original(*args, **kwargs)
+        closed.wait(10)
+    first.iter_lines = open_iter
+    second = _FakeStreamResp(_lines({"type": "text-delta", "delta": "Done."}, {"type": "trigger:turn-complete"}, start_id=90))
+    appmod, c, gen, result, appends = _native_hitl_setup(web, monkeypatch, [first, second])
+    try:
+        for raw in gen:
+            event = _sse_events_from_raw([raw])[0]
+            if event['type'] == 'question':
+                assert c.post(f"/api/questions/{event['id']}", json={'answer': 'Yes'}).status_code == 200
+                break
+        else:
+            assert False, 'question was not surfaced'
+        list(gen)
+        assert result['text'] == 'Done.'
+        assert appends
+    finally:
+        closed.set()

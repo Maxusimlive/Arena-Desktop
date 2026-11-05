@@ -54,9 +54,9 @@ jobs:
         run: |
           python -c "import platform, struct, sys; print(sys.executable); print(platform.platform()); print(platform.machine(), struct.calcsize('P') * 8)"
 
-      - name: Run non-browser tests
+      - name: Run non-browser tests in timed groups
         shell: pwsh
-        run: python -m pytest -q --ignore=tests/test_ui_browser.py -m "not browser"
+        run: python scripts/run_test_groups.py
 
       - name: Build one-file EXE
         shell: pwsh

@@ -462,13 +462,15 @@
     try { return JSON.parse(text); } catch { return text; }
   }
 
+  const _apiToken = document.querySelector('meta[name="api-token"]')?.content || '';
+
   const liveApi = {
     async request(path, { method = 'GET', body, signal } = {}) {
       const options = {
         method,
         credentials: 'same-origin',
         cache: 'no-store',
-        headers: { Accept: 'application/json' },
+        headers: { Accept: 'application/json', 'X-Arena-Token': _apiToken },
         signal
       };
       if (body !== undefined) {
@@ -518,8 +520,11 @@
     getGateway() { return this.request('/api/gateway'); },
     startGateway() { return this.request('/api/gateway/start', { method: 'POST', body: {} }); },
     stopGateway() { return this.request('/api/gateway/stop', { method: 'POST', body: {} }); },
-    getComponents() { return this.request('/api/components'); },
+    getComponents(refresh = false) { return this.request(`/api/components${refresh ? '?refresh=1' : ''}`); },
     installComponent(id) { return this.request('/api/components/install', { method: 'POST', body: { id } }); },
+    recheckWebdev(id) { return this.request(`/api/chats/${encodeURIComponent(id)}/webdev-recheck`, { method: 'POST', body: {} }); },
+    getNativeSubagents(id) { return this.request(`/api/chats/${encodeURIComponent(id)}/native-subagents`); },
+    stopNativeSubagents(id) { return this.request(`/api/chats/${encodeURIComponent(id)}/native-subagents`, { method: 'DELETE' }); },
     getQuestions() { return this.request('/api/questions'); },
     answerQuestion(id, answer) { return this.request(`/api/questions/${encodeURIComponent(id)}`, { method: 'POST', body: { answer } }); },
     getMediaChoices() { return this.request('/api/media-choices'); },
@@ -555,7 +560,7 @@
       try {
         response = await fetch('/api/uploads', {
           method: 'POST', credentials: 'same-origin', cache: 'no-store',
-          headers: { Accept: 'application/json' }, body: form
+          headers: { Accept: 'application/json', 'X-Arena-Token': _apiToken }, body: form
         });
       } catch (error) {
         throw new ApiError("The local application server is unavailable. The file was not uploaded.", 0, error);
@@ -576,7 +581,7 @@
     async downloadWorkspaceFile(path) {
       let response;
       try {
-        response = await fetch(`/api/workspace/download?path=${encodeURIComponent(path)}`, { credentials: 'same-origin', cache: 'no-store' });
+        response = await fetch(`/api/workspace/download?path=${encodeURIComponent(path)}`, { credentials: 'same-origin', cache: 'no-store', headers: { 'X-Arena-Token': _apiToken } });
       } catch (error) {
         throw new ApiError('The local application server is unavailable.', 0, error);
       }
@@ -605,7 +610,7 @@
     async workspaceZip(path) {
       let response;
       try {
-        response = await fetch(`/api/workspace/zip?path=${encodeURIComponent(path)}`, { credentials: 'same-origin', cache: 'no-store' });
+        response = await fetch(`/api/workspace/zip?path=${encodeURIComponent(path)}`, { credentials: 'same-origin', cache: 'no-store', headers: { 'X-Arena-Token': _apiToken } });
       } catch (error) {
         throw new ApiError("The local application server is unavailable.", 0, error);
       }
@@ -632,7 +637,7 @@
           method: 'POST',
           credentials: 'same-origin',
           cache: 'no-store',
-          headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json' },
+          headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json', 'X-Arena-Token': _apiToken },
           body: JSON.stringify(body),
           signal
         });
@@ -1068,7 +1073,7 @@
         permission_mode: demoStore.permissionMode,
         workspace: demoStore.workspace,
         workspace_chosen: true,
-        app_version: '5.7.0',
+        app_version: '5.8.1',
         pending_permissions: demoStore.pendingPermissions.length,
         demo: true
       };
@@ -1326,6 +1331,9 @@
       }, 1100);
       return Promise.resolve({ ok: true, demo: true });
     },
+    async recheckWebdev() { return { previews: [] }; },
+    async getNativeSubagents() { return { children: [] }; },
+    async stopNativeSubagents() { return { cancelled: 0 }; },
     async getQuestions() { await sleep(40); return []; },
     async answerQuestion() { await sleep(40); return { ok: true, demo: true }; },
     async getMediaChoices() { await sleep(40); return demoClone(demoStore.mediaChoices || []); },
@@ -1849,6 +1857,8 @@ You can start with a more structured option: one script, short captions, and a c
     updateInfo: null,
     appSettings: null,
     pendingQuestions: [],
+    nativeSubagents: [],
+    nativeSubagentsChat: null,
     pendingMediaChoices: [],
     answeringMediaChoices: new Set(),
     openDetails: new Set(),
@@ -4210,7 +4220,7 @@ You can start with a more structured option: one script, short captions, and a c
 
     if (lane.reasoning) {
       const details = preservedDetails(`${baseKey}:reasoning`, 'reasoning',
-        el('summary', { text: lane.demo ? "Reflections · demo" : "Reflections" }),
+        el('summary', { text: lane.demo ? "Thinking · demo" : "Thinking" }),
         el('div', { class: 'reasoning-content', text: lane.reasoning, 'data-scroll-key': `${baseKey}:reasoning-content` })
       );
       card.appendChild(details);
@@ -4361,15 +4371,21 @@ You can start with a more structured option: one script, short captions, and a c
   async function loadQuestions() {
     try {
       const items = await API.getQuestions();
-      state.pendingQuestions = (Array.isArray(items) ? items : []).map((q) => ({
+      const questions = (Array.isArray(items) ? items : []).map((q) => ({
         id: String(q.id), chatId: q.chat_id || q.chatId || null, lane: q.lane === 'b' ? 'b' : 'a',
         question: textValue(q.question),
         options: Array.isArray(q.options) ? q.options.map(textValue).filter(Boolean) : [],
         custom: q.custom !== false, subagent: q.subagent || null,
         kind: q.kind === 'plan' ? 'plan' : 'question', plan: textValue(q.plan)
       })).filter((q) => q.id && q.id !== 'undefined');
-      updatePendingPermissionsBadge();
-      if (state.view === 'chat') renderMessages();
+      const comparable = (list) => JSON.stringify(list.map(({ draft, ...q }) => q));
+      if (comparable(state.pendingQuestions) !== comparable(questions)) {
+        const drafts = new Map(state.pendingQuestions.map((q) => [q.id, q.draft]));
+        questions.forEach((q) => { if (drafts.has(q.id)) q.draft = drafts.get(q.id); });
+        state.pendingQuestions = questions;
+        updatePendingPermissionsBadge();
+        if (state.view === 'chat') renderMessages();
+      }
     } catch { /* offline: live questions still arrive over the stream */ }
   }
 
@@ -4431,6 +4447,49 @@ You can start with a more structured option: one script, short captions, and a c
     }
     card.append(head, body);
     return card;
+  }
+
+  async function refreshNativeSubagents() {
+    const chatId = state.activeChatId;
+    if (!chatId || state.view !== 'chat') return;
+    try {
+      const data = await API.getNativeSubagents(chatId);
+      if (String(state.activeChatId) !== String(chatId)) return;
+      const children = Array.isArray(data?.children) ? data.children : [];
+      const changed = state.nativeSubagentsChat !== chatId || JSON.stringify(children) !== JSON.stringify(state.nativeSubagents);
+      state.nativeSubagentsChat = chatId;
+      state.nativeSubagents = children;
+      if (changed) renderMessages();
+      if (children.some((item) => item.state === 'starting' || item.state === 'running')) {
+        void loadQuestions();
+        void loadMediaChoices();
+        void loadPermissions({ quiet: true });
+        void refreshStatusSilently();
+      }
+    } catch { /* chat may have been removed */ }
+  }
+
+  function renderNativeSubagents() {
+    if (String(state.nativeSubagentsChat) !== String(state.activeChatId) || !state.nativeSubagents.length) return null;
+    const section = el('section', { class: 'message-turn', 'aria-label': 'Sub-agents' },
+      el('p', { class: 'permission-title', text: 'Sub-agents' }));
+    state.nativeSubagents.forEach((child) => {
+      const button = el('button', { class: 'button button-small button-quiet', type: 'button' },
+        el('span', { text: `${child.task_path || 'Task'} · ${child.state}` }));
+      button.addEventListener('click', () => { void openChat(child.child_id); });
+      section.appendChild(button);
+    });
+    if (state.nativeSubagents.some((item) => item.state === 'starting' || item.state === 'running')) {
+      const stop = el('button', { class: 'button button-small button-quiet', type: 'button' },
+        el('span', { text: 'Stop sub-agents' }));
+      stop.addEventListener('click', async () => {
+        stop.disabled = true;
+        try { await API.stopNativeSubagents(state.activeChatId); void refreshNativeSubagents(); }
+        catch (error) { toast(errorMessage(error), 'error', 'Sub-agents'); stop.disabled = false; }
+      });
+      section.appendChild(stop);
+    }
+    return section;
   }
 
   function renderUnattachedQuestions() {
@@ -4532,6 +4591,25 @@ You can start with a more structured option: one script, short captions, and a c
     }
   }
 
+  // Local API routes require a token header; direct <img>/<a> requests
+  // cannot send it. Fetch only the narrowly scoped CAS route, then use a
+  // same-process blob URL without ever putting the token in a URL.
+  const protectedMediaBlobs = new Map();
+  function mediaBlobUrl(url) {
+    if (!/^\/api\/native-cas\/[A-Za-z0-9_-]{43}$/.test(url || '')) return Promise.resolve(url);
+    if (!protectedMediaBlobs.has(url)) {
+      const pending = fetch(url, { headers: { 'X-Arena-Token': _apiToken }, credentials: 'same-origin', cache: 'no-store' })
+        .then((response) => { if (!response.ok) throw new Error('Media unavailable'); return response.blob(); })
+        .then((blob) => URL.createObjectURL(blob))
+        .catch((error) => { protectedMediaBlobs.delete(url); throw error; });
+      protectedMediaBlobs.set(url, pending);
+    }
+    return protectedMediaBlobs.get(url);
+  }
+  window.addEventListener('beforeunload', () => {
+    protectedMediaBlobs.forEach((promise) => { void promise.then((url) => URL.revokeObjectURL(url)).catch(() => {}); });
+  });
+
   function renderMediaChoiceCard(choice) {
     const pending = mediaChoiceIsPending(choice);
     const submitting = choice.status === 'submitting' || (choice.id && state.answeringMediaChoices.has(String(choice.id)));
@@ -4577,10 +4655,11 @@ You can start with a more structured option: one script, short captions, and a c
       if (isVoice) {
         if (candidate.url) {
           const audio = el('audio', {
-            controls: true, preload: 'metadata', src: candidate.url,
+            controls: true, preload: 'metadata', src: candidate.url.startsWith('/api/native-cas/') ? null : candidate.url,
             'aria-label': `Listen to voice option ${candidate.index + 1}`,
             'data-preserve-key': `voice-choice:${choice.id || choice.toolCallId || 'saved'}:${candidate.index}:${candidate.hash || candidate.url}`
           });
+          if (candidate.url.startsWith('/api/native-cas/')) void mediaBlobUrl(candidate.url).then((url) => { audio.src = url; }).catch(() => {});
           audio.addEventListener('play', () => {
             const record = voiceStatsRecord(choice);
             record.playCounts[candidate.index] = (Number(record.playCounts[candidate.index]) || 0) + 1;
@@ -4595,10 +4674,13 @@ You can start with a more structured option: one script, short captions, and a c
           figure.appendChild(el('div', { class: 'media-choice-preview is-placeholder' }, iconEl('mic')));
         }
       } else if (candidate.url) {
-        figure.appendChild(el('a', {
-          class: 'media-choice-preview', href: candidate.url, target: '_blank', rel: 'noopener noreferrer',
-          title: 'Open full size', 'aria-label': `Open image option ${candidate.index + 1} full size`
-        }, el('img', { src: candidate.url, alt: `Generated image option ${candidate.index + 1}`, loading: 'lazy' })));
+        const isProtected = candidate.url.startsWith('/api/native-cas/');
+        const image = el('img', { src: isProtected ? null : candidate.url, alt: `Generated image option ${candidate.index + 1}`, loading: 'lazy' });
+        const preview = el('a', { class: 'media-choice-preview', href: isProtected ? '#' : candidate.url,
+          target: '_blank', rel: 'noopener noreferrer', title: 'Open full size',
+          'aria-label': `Open image option ${candidate.index + 1} full size` }, image);
+        if (isProtected) void mediaBlobUrl(candidate.url).then((url) => { image.src = url; preview.href = url; }).catch(() => {});
+        figure.appendChild(preview);
       } else {
         figure.appendChild(el('div', { class: 'media-choice-preview is-placeholder' }, iconEl('image')));
       }
@@ -4620,9 +4702,11 @@ You can start with a more structured option: one script, short captions, and a c
       }
       const actions = el('div', { class: 'media-choice-actions' });
       if (candidate.url) {
-        actions.appendChild(el('a', {
-          class: 'button button-small button-quiet', href: candidate.url, target: '_blank', rel: 'noopener noreferrer'
-        }, iconEl('external'), el('span', { text: isVoice ? 'Open audio' : 'Full size' })));
+        const isProtected = candidate.url.startsWith('/api/native-cas/');
+        const link = el('a', { class: 'button button-small button-quiet', href: isProtected ? '#' : candidate.url,
+          target: '_blank', rel: 'noopener noreferrer' }, iconEl('external'), el('span', { text: isVoice ? 'Open audio' : 'Full size' }));
+        if (isProtected) void mediaBlobUrl(candidate.url).then((url) => { link.href = url; }).catch(() => {});
+        actions.appendChild(link);
       }
       if (pending && choice.id) {
         const use = el('button', {
@@ -4747,7 +4831,7 @@ You can start with a more structured option: one script, short captions, and a c
     }).catch(() => { state.eloModels = {}; state._eloLoading = false; });
   }
 
-  function exportChatMd(format = 'md') {
+  async function exportChatMd(format = 'md') {
     const id = state.activeChatId;
     if (!id) return;
     const extension = format === 'html' ? 'html' : 'md';
@@ -4786,8 +4870,16 @@ You can start with a more structured option: one script, short captions, and a c
       window.setTimeout(() => URL.revokeObjectURL(a.href), 1000);
       return;
     }
-    const a = el('a', { href: `/api/chats/${encodeURIComponent(id)}/export.${extension}`, download: '' });
-    document.body.appendChild(a); a.click(); a.remove();
+    try {
+      const response = await fetch(`/api/chats/${encodeURIComponent(id)}/export.${extension}`, {
+        headers: { 'X-Arena-Token': _apiToken }, credentials: 'same-origin', cache: 'no-store'
+      });
+      if (!response.ok) throw new Error(`Export failed (HTTP ${response.status})`);
+      const url = URL.createObjectURL(await response.blob());
+      const a = el('a', { href: url, download: `chat.${extension}` });
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    } catch (error) { toast(errorMessage(error), 'error', 'Export failed'); }
   }
 
   async function openChatAtMessage(chatId, msgIndex) {
@@ -5079,6 +5171,15 @@ You can start with a more structured option: one script, short captions, and a c
         el('h3', { text: state.activeChatId ? "History is currently empty" : "Start a new dialogue" }),
         el('p', { text: state.activeChatId ? "Send the first message — responses will appear here. Mode and task type settings are visible in the input field." : "Select an existing chat or create a new one." })
       ));
+      // Live agent prompts and child controls must remain visible even when
+      // the history snapshot has not yet acquired its first message.
+      const pending = renderUnattachedPermissions(new Set());
+      const questions = renderUnattachedQuestions();
+      const children = renderNativeSubagents();
+      const choices = renderUnattachedMediaChoices();
+      const todos = renderUnattachedTodos();
+      [pending, questions, children, choices, todos].forEach((node) => { if (node) els.messageList.appendChild(node); });
+      restoreMessageUiState(uiSnapshot);
       return;
     }
 
@@ -5106,6 +5207,8 @@ You can start with a more structured option: one script, short captions, and a c
     if (unattached) els.messageList.appendChild(unattached);
     const questions = renderUnattachedQuestions();
     if (questions) els.messageList.appendChild(questions);
+    const children = renderNativeSubagents();
+    if (children) els.messageList.appendChild(children);
     const mediaChoices = renderUnattachedMediaChoices();
     if (mediaChoices) els.messageList.appendChild(mediaChoices);
     const todos = renderUnattachedTodos();
@@ -5248,7 +5351,7 @@ You can start with a more structured option: one script, short captions, and a c
   function maybeGatewaySetupPrompt() {
     if (gatewaySetupPrompted || state.demo) return;
     if (state.gateway?.state !== 'needs_cloudflared') return;
-    if (!state.appSettings?.gateway_enabled) return;
+    if (state.appSettings?.gateway_enabled === false) return;
     gatewaySetupPrompted = true;
     showCloudflaredInstallModal(() => {
       toast('cloudflared installed — the gateway starts with your next new Agent chat.', 'success', 'Agent Gateway');
@@ -5262,7 +5365,7 @@ You can start with a more structured option: one script, short captions, and a c
   function maybeWarmGateway() {
     const cfg = state.appSettings || {};
     const wanted = state.mode === 'agent' && state.directTools
-      && cfg.gateway_enabled === true && cfg.gateway_auto === true && !state.demo;
+      && cfg.gateway_enabled !== false && cfg.gateway_auto !== false && !state.demo;
     if (!wanted) { gatewayWarmAttempted = false; return; }
     if (state.gateway?.active) { gatewayWasActive = true; gatewayWarmAttempted = true; return; }
     // A session that was live and then stopped (Stop button, idle expiry)
@@ -5877,7 +5980,9 @@ You can start with a more structured option: one script, short captions, and a c
       if (Array.isArray(item.tools)) item.tools.forEach((step) => {
         if (step?.media_choice || step?.mediaChoice) upsertLaneMediaChoice(lane, step.media_choice || step.mediaChoice);
       });
-      if (Array.isArray(item.artifacts)) lane.artifacts.push(...item.artifacts.map((artifact) => normalizeArtifact(artifact)).filter(Boolean));
+      if (Array.isArray(item.artifacts)) lane.artifacts.push(...item.artifacts
+        .filter((artifact) => (artifact?.lane || 'a') === key)
+        .map((artifact) => normalizeArtifact(artifact, artifact?.kind || 'file')).filter(Boolean));
       if (Array.isArray(item.permissions)) lane.permissions.push(...item.permissions.map(normalizePermission).filter(Boolean));
       if (Array.isArray(item.notices)) lane.notices.push(...item.notices.map(textValue).filter(Boolean));
       if (Array.isArray(item.errors)) lane.errors.push(...item.errors.map(textValue).filter(Boolean));
@@ -5932,7 +6037,7 @@ You can start with a more structured option: one script, short captions, and a c
               media_choices: undefined,
               mediaChoices: undefined,
               tools: undefined,
-              artifacts: undefined,
+              artifacts: item.artifacts,
               permissions: undefined,
               notices: undefined,
               errors: Array.isArray(laneErrors?.b) ? laneErrors.b : undefined,
@@ -6096,8 +6201,26 @@ You can start with a more structured option: one script, short captions, and a c
       syncGenerationState();
       void loadQuestions();
       void loadMediaChoices();
+      void refreshNativeSubagents();
+      let recheck = Promise.resolve();
+      if (state.modality === 'code' && !chatIsGenerating(chatId)) {
+        recheck = API.recheckWebdev(chatId).then((result) => {
+          if (String(state.activeChatId) !== String(chatId)) return;
+          for (const preview of result?.previews || []) {
+            const turn = state.messages.find((item) => item.msgEnd === preview.msg_index);
+            const lane = turn?.lanes?.[preview.lane === 'b' ? 'b' : 'a'];
+            if (!lane || lane.artifacts.some((item) => item.url === preview.url)) continue;
+            const artifact = normalizeArtifact({ url: preview.url, name: 'Deployed preview', title: 'Deployed preview' }, 'preview');
+            if (artifact) { lane.artifacts.push(artifact); addArtifactRecord(artifact, preview.lane || 'a'); }
+          }
+          if (result?.previews?.length) renderMessages();
+        }).catch(() => {});
+      }
       if (!skipRefresh && state.activeChatEvalId && !chatIsGenerating(chatId)) {
-        void refreshActiveChat({ silent: true, automatic: true });
+        void recheck.then(() => {
+          if (String(state.activeChatId) === String(chatId) && !chatIsGenerating(chatId))
+            return refreshActiveChat({ silent: true, automatic: true });
+        });
       }
       announce(`Dialog “${state.activeChatTitle}” loaded.`);
     } catch (error) {
@@ -7140,7 +7263,7 @@ You can start with a more structured option: one script, short captions, and a c
   }
   function attachmentCompatibilityIssue() {
     if (!state.attachments.length) return '';
-    if (state.mode === 'agent' || state.mode === 'battle' || isAgentBackend()) return '';
+    if (state.mode === 'agent' || state.mode === 'battle') return '';
     const models = state.mode === 'side-by-side'
       ? [['Model A', currentModelA()], ['Model B', currentModelB()]]
       : (state.mode === 'direct' && Array.isArray(state.fanoutModels) && state.fanoutModels.length >= 2
@@ -9115,6 +9238,102 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
 
+    function installCardShell(title) {
+    document.getElementById('installCard')?.remove();
+    const body = el('div', { class: 'install-card-body' });
+    const card = el('div', { class: 'install-card', id: 'installCard', role: 'status' },
+      el('div', { class: 'install-card-head' },
+        el('strong', { text: title }),
+        el('button', {
+          class: 'icon-button tiny', type: 'button', 'aria-label': 'Close',
+          onclick: () => card.remove()
+        }, iconEl('x'))),
+      body);
+    document.body.appendChild(card);
+    return { card, body };
+  }
+
+  function runComponentInstall(id, name, onDone) {
+    const { card, body } = installCardShell(`Installing ${name}`);
+    const fillBar = el('div', { class: 'install-progress-fill' });
+    const note = el('p', { class: 'modal-note', text: 'Starting…' });
+    body.append(note, el('div', { class: 'install-progress' }, fillBar));
+    let timer = null;
+    const finish = (ok, message) => {
+      if (timer) clearInterval(timer);
+      note.textContent = message;
+      if (ok) {
+        fillBar.style.width = '100%';
+        try { onDone?.(); } catch { /* noop */ }
+        setTimeout(() => card.remove(), 1400);
+      }
+    };
+    void (async () => {
+      try {
+        const result = await API.installComponent(id);
+        if (result?.open_url) {
+          window.open(result.open_url, '_blank', 'noopener');
+          finish(false, 'The official download page opened in your browser. Install it there — Settings → Components detects it afterwards.');
+          return;
+        }
+        timer = setInterval(() => {
+          if (!card.isConnected) { clearInterval(timer); return; }
+          void (async () => {
+            try {
+              const data = await API.getComponents();
+              const job = data?.jobs?.[id] || {};
+              if (typeof job.progress === 'number') fillBar.style.width = `${job.progress}%`;
+              if (job.state === 'done') finish(true, `${name} is installed.`);
+              else if (job.state === 'installer_started') finish(false, job.hint || 'Complete the installer window — Components detects it afterwards.');
+              else if (job.state === 'error') finish(false, job.error || 'Installation failed.');
+              else note.textContent = `Downloading… ${Math.round(job.progress || 0)}%`;
+            } catch { /* keep polling */ }
+          })();
+        }, 700);
+      } catch (error) {
+        finish(false, errorMessage(error));
+      }
+    })();
+  }
+
+  function showCloudflaredInstallModal(onDone) {
+    const { card, body } = installCardShell('Component needed: cloudflared');
+    body.append(
+      el('p', { class: 'modal-note', text: 'The Agent Gateway reaches this computer through a temporary Cloudflare tunnel. That needs cloudflared — a single official Cloudflare file (about 53 MB), downloaded once into the app\u2019s data folder and verified by checksum. No administrator rights, nothing else is installed.' }),
+      el('div', { class: 'install-card-actions' },
+        el('button', { class: 'button button-small button-quiet', type: 'button', onclick: () => card.remove() },
+          el('span', { text: 'Not now' })),
+        el('button', {
+          class: 'button button-small', type: 'button',
+          onclick: () => runComponentInstall('cloudflared', 'cloudflared', onDone)
+        }, iconEl('download'), el('span', { text: 'Install cloudflared' }))));
+  }
+
+  async function maybeShowFirstRunComponents() {
+    if (state.demo || !state.status?.desktop) return;
+    try { if (localStorage.getItem('arenaDesktop.componentsPrompt.v1')) return; } catch { return; }
+    let data;
+    try { data = await API.getComponents(true); } catch { return; }
+    if (!Array.isArray(data?.components)) return;
+    // Only interrupt startup when something is actually missing — and only
+    // cloudflared (required for the Gateway) justifies the prompt; Node.js
+    // and Python are optional and live quietly in Settings → Components.
+    const missing = data.components.filter((comp) => !comp.installed);
+    if (!missing.length) return;
+    if (!missing.some((comp) => comp.id === 'cloudflared')) return;
+    try { localStorage.setItem('arenaDesktop.componentsPrompt.v1', '1'); } catch { /* best effort */ }
+    const { card, body } = installCardShell('Components for Arena Desktop');
+    body.appendChild(el('p', { class: 'modal-note', text: 'cloudflared is required for native Agent Workspace Sync and sub-agents. Node.js and Python are optional for local MCP servers. Nothing is installed until you choose Install.' }));
+    data.components.forEach((comp) => {
+      const action = comp.installed ? el('span', { text: 'Installed' })
+        : el('button', { class: 'button button-small', type: 'button', onclick: () => runComponentInstall(comp.id, comp.name, () => {}) },
+             iconEl('download'), el('span', { text: 'Install' }));
+      body.appendChild(el('div', { class: 'component-row' }, el('span', { text: comp.name || comp.id }), action));
+    });
+    body.appendChild(el('button', { class: 'button button-small button-quiet', type: 'button', onclick: () => card.remove() }, el('span', { text: 'Not now' })));
+  }
+
+
   function openSettings(initialTab = 'connection') {
     const tabDefs = [
       { id: 'connection', label: 'Account', icon: 'user' },
@@ -9403,8 +9622,7 @@ You can start with a more structured option: one script, short captions, and a c
       const timeIn = el('input', { class: 'input', type: 'time', value: '09:00' });
       const minsIn = el('input', { class: 'input', type: 'number', value: '120', min: '5' });
       const permSel = el('select', { class: 'input' },
-        el('option', { value: 'plan', text: 'Plan (read-only)' }),
-        el('option', { value: 'bypassPermissions', text: 'Full access (unattended)' }));
+        el('option', { value: 'plan', text: 'Plan (read-only)' }));
       const syncKind = () => {
         timeIn.hidden = kindSel.value !== 'daily';
         minsIn.hidden = kindSel.value !== 'every';
@@ -9452,14 +9670,14 @@ You can start with a more structured option: one script, short captions, and a c
           const row = el('div', { class: 'automation-row' },
             el('div', { class: 'automation-main' },
               el('span', { class: 'automation-name', text: item.name || 'Automation' }),
-              el('span', { class: 'setting-desc', text: `${item.schedule} · ${item.permission === 'bypassPermissions' ? 'full access' : 'plan'} · last run: ${last}` }),
+              el('span', { class: 'setting-desc', text: `${item.schedule} · plan · last run: ${last}` }),
               el('span', { class: 'automation-prompt', text: item.prompt || '' })),
             el('label', { class: 'switch' }, enabledBox, el('span', { class: 'switch-track', 'aria-hidden': 'true' })),
             settingsActionButton('Edit', 'sliders', async () => {
               editingId = item.id;
               nameIn.value = item.name || '';
               promptIn.value = item.prompt || '';
-              permSel.value = item.permission === 'bypassPermissions' ? 'bypassPermissions' : 'plan';
+              permSel.value = 'plan';
               const sched = String(item.schedule || '');
               if (sched.startsWith('daily')) {
                 kindSel.value = 'daily';
@@ -9486,83 +9704,13 @@ You can start with a more structured option: one script, short captions, and a c
       return wrap;
     }
 
-    function installCardShell(title) {
-    document.getElementById('installCard')?.remove();
-    const body = el('div', { class: 'install-card-body' });
-    const card = el('div', { class: 'install-card', id: 'installCard', role: 'status' },
-      el('div', { class: 'install-card-head' },
-        el('strong', { text: title }),
-        el('button', {
-          class: 'icon-button tiny', type: 'button', 'aria-label': 'Close',
-          onclick: () => card.remove()
-        }, iconEl('x'))),
-      body);
-    document.body.appendChild(card);
-    return { card, body };
-  }
-
-  function runComponentInstall(id, name, onDone) {
-    const { card, body } = installCardShell(`Installing ${name}`);
-    const fillBar = el('div', { class: 'install-progress-fill' });
-    const note = el('p', { class: 'modal-note', text: 'Starting…' });
-    body.append(note, el('div', { class: 'install-progress' }, fillBar));
-    let timer = null;
-    const finish = (ok, message) => {
-      if (timer) clearInterval(timer);
-      note.textContent = message;
-      if (ok) {
-        fillBar.style.width = '100%';
-        try { onDone?.(); } catch { /* noop */ }
-        setTimeout(() => card.remove(), 1400);
-      }
-    };
-    void (async () => {
-      try {
-        const result = await API.installComponent(id);
-        if (result?.open_url) {
-          window.open(result.open_url, '_blank', 'noopener');
-          finish(false, 'The official download page opened in your browser. Install it there — Settings → Components detects it afterwards.');
-          return;
-        }
-        timer = setInterval(() => {
-          if (!card.isConnected) { clearInterval(timer); return; }
-          void (async () => {
-            try {
-              const data = await API.getComponents();
-              const job = data?.jobs?.[id] || {};
-              if (typeof job.progress === 'number') fillBar.style.width = `${job.progress}%`;
-              if (job.state === 'done') finish(true, `${name} is installed.`);
-              else if (job.state === 'installer_started') finish(false, job.hint || 'Complete the installer window — Components detects it afterwards.');
-              else if (job.state === 'error') finish(false, job.error || 'Installation failed.');
-              else note.textContent = `Downloading… ${Math.round(job.progress || 0)}%`;
-            } catch { /* keep polling */ }
-          })();
-        }, 700);
-      } catch (error) {
-        finish(false, errorMessage(error));
-      }
-    })();
-  }
-
-  function showCloudflaredInstallModal(onDone) {
-    const { card, body } = installCardShell('Component needed: cloudflared');
-    body.append(
-      el('p', { class: 'modal-note', text: 'The Agent Gateway reaches this computer through a temporary Cloudflare tunnel. That needs cloudflared — a single official Cloudflare file (about 53 MB), downloaded once into the app\u2019s data folder and verified by checksum. No administrator rights, nothing else is installed.' }),
-      el('div', { class: 'install-card-actions' },
-        el('button', { class: 'button button-small button-quiet', type: 'button', onclick: () => card.remove() },
-          el('span', { text: 'Not now' })),
-        el('button', {
-          class: 'button button-small', type: 'button',
-          onclick: () => runComponentInstall('cloudflared', 'cloudflared', onDone)
-        }, iconEl('download'), el('span', { text: 'Install cloudflared' }))));
-  }
-
   function renderComponentsPanel() {
     const wrap = el('div', { class: 'memory-panel' });
     const listHost = el('div', {}, el('p', { class: 'modal-note', text: 'Checking components…' }));
-    const fill = async () => {
+    const fill = async (refresh = false) => {
       let data = null;
-      try { data = await API.getComponents(); } catch (_err) { /* below */ }
+      if (refresh) listHost.replaceChildren(el('p', { class: 'modal-note', text: 'Checking components…' }));
+      try { data = await API.getComponents(refresh); } catch (_err) { /* below */ }
       if (!wrap.isConnected) return;
       clear(listHost);
       if (!data?.components) {
@@ -9595,7 +9743,7 @@ You can start with a more structured option: one script, short captions, and a c
       el('p', { class: 'modal-note', text: 'Arena Desktop itself is a single file and needs none of these for regular chats. Optional components unlock specific features and are only ever installed when you ask; downloads come from the official sources shown.' }),
       el('div', { class: 'modal-field-row' },
         el('span', { class: 'modal-field-label', text: 'Status' }),
-        el('button', { class: 'btn ghost small', type: 'button', onclick: () => { void fill(); } },
+        el('button', { class: 'btn ghost small', type: 'button', onclick: () => { void fill(true); } },
           el('span', { text: 'Check again' }))),
       listHost);
     requestAnimationFrame(() => { void fill(); });
@@ -9605,7 +9753,7 @@ You can start with a more structured option: one script, short captions, and a c
   function renderGatewayPanel() {
     const wrap = el('div', { class: 'memory-panel' });
     wrap.appendChild(el('h3', { class: 'modal-section-title', text: 'Agent Gateway' }));
-    wrap.appendChild(el('p', { class: 'modal-note', text: 'Lets the genuine Arena Agent use selected local MCP servers (Blender, Roblox Studio…) and your picked Workspace folder on this computer. For a session, a temporary Cloudflare tunnel exposes a pairing-protected job endpoint; the agent receives the address automatically in Agent chats — including a fresh address when a continued chat finds its tunnel gone. Tool calls follow your Permissions mode — the app asks before anything that can change things, unless you use Bypass. Off by default: a tunnel makes this PC reachable from the internet for anyone holding the pairing code, so keep the code secret and stop the session when done.' }));
+    wrap.appendChild(el('p', { class: 'modal-note', text: 'Lets the genuine Arena Agent use selected local MCP servers (Blender, Roblox Studio…) and your picked Workspace folder on this computer. For a session, a temporary Cloudflare tunnel exposes a pairing-protected job endpoint; the agent receives the address automatically in Agent chats — including a fresh address when a continued chat finds its tunnel gone. Tool calls follow your Permissions mode — the app asks before anything that can change things, unless you use Bypass. Workspace Sync can start a tunnel automatically. A tunnel makes this PC reachable from the internet for anyone holding the pairing code, so keep the code secret and stop the session when done.' }));
     const host = el('div', {}, el('p', { class: 'modal-note', text: 'Loading gateway status…' }));
     wrap.appendChild(host);
     let poll = null;
@@ -10755,7 +10903,9 @@ You can start with a more structured option: one script, short captions, and a c
         return false;
       }
     };
+    const previewUrls = [];
     const open = (bodyNodes, actions) => mountModal({
+      onClose: () => previewUrls.forEach((url) => URL.revokeObjectURL(url)),
       title: entry.name,
       subtitle: `${entry.path}${entry.size ? ` \u00B7 ${formatBytes(entry.size)}` : ''}`,
       size: 'large',
@@ -10764,16 +10914,14 @@ You can start with a more structured option: one script, short captions, and a c
     });
     try {
       if (kind === 'image') {
-        const src = state.demo
-          ? URL.createObjectURL(await API.downloadWorkspaceFile(entry.path))
-          : workspacePreviewUrl(entry.path);
+        const src = URL.createObjectURL(await API.downloadWorkspaceFile(entry.path));
+        previewUrls.push(src);
         open([el('div', { class: 'file-preview-media' }, el('img', { src, alt: entry.name }))]);
         return;
       }
       if (kind === 'audio' || kind === 'video') {
-        const src = state.demo
-          ? URL.createObjectURL(await API.downloadWorkspaceFile(entry.path))
-          : workspacePreviewUrl(entry.path);
+        const src = URL.createObjectURL(await API.downloadWorkspaceFile(entry.path));
+        previewUrls.push(src);
         const media = kind === 'audio'
           ? el('audio', { controls: true, src, preload: 'metadata' })
           : el('video', { controls: true, src, preload: 'metadata' });
@@ -10781,19 +10929,18 @@ You can start with a more structured option: one script, short captions, and a c
         return;
       }
       if (kind === 'pdf' && !state.demo) {
-        open([el('iframe', { class: 'file-preview-frame', src: workspacePreviewUrl(entry.path), title: entry.name })]);
+        const src = URL.createObjectURL(await API.downloadWorkspaceFile(entry.path));
+        previewUrls.push(src);
+        open([el('iframe', { class: 'file-preview-frame', sandbox: '', src, title: entry.name })]);
         return;
       }
       if (kind === 'html') {
-        if (state.demo) {
-          const raw = await API.getWorkspaceFile(entry.path);
-          open([el('iframe', { class: 'file-preview-frame', sandbox: 'allow-scripts', srcdoc: String(raw?.content ?? ''), title: entry.name })]);
-        } else {
-          open([
-            el('div', { class: 'note-box' }, iconEl('shield'), el('span', { text: 'Rendered in a sandboxed frame: scripts run, but the page cannot reach the app or your Arena account.' })),
-            el('iframe', { class: 'file-preview-frame', sandbox: 'allow-scripts allow-modals allow-popups', src: workspacePreviewUrl(entry.path), title: entry.name })
-          ]);
-        }
+        const raw = await API.getWorkspaceFile(entry.path);
+        const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'">`;
+        open([
+          el('div', { class: 'note-box' }, iconEl('shield'), el('span', { text: 'Sandboxed preview: scripts and network access are disabled.' })),
+          el('iframe', { class: 'file-preview-frame', sandbox: '', srcdoc: csp + String(raw?.content ?? ''), title: entry.name })
+        ]);
         return;
       }
       const raw = await API.getWorkspaceFile(entry.path);
@@ -12144,6 +12291,8 @@ You can start with a more structured option: one script, short captions, and a c
   /* ---------------------------------------------------------------------- */
   /* Boot                                                                  */
   /* ---------------------------------------------------------------------- */
+  window.setInterval(() => { void refreshNativeSubagents(); }, 3000);
+
   async function boot() {
     loadUnreadDone();
     cacheElements();
@@ -12213,6 +12362,7 @@ You can start with a more structured option: one script, short captions, and a c
       state.phase = state.serverError ? 'offline' : 'ready';
       ensureBypassWarning();
       updateAllUI();
+      void maybeShowFirstRunComponents();
       applyInitialDeepLink();
       if (pendingDeepLink) {
         const link = pendingDeepLink;

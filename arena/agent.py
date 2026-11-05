@@ -345,9 +345,14 @@ def run_shell_command(cmd: str, cwd) -> str:
     refusal = _interactive_refusal(cmd)
     if refusal:
         return refusal
-    proc = subprocess.Popen(cmd, shell=True, cwd=str(cwd), stdin=subprocess.DEVNULL,
+    if re.search(r"(?:^|\s)(?:-c|-e|--eval|-enc|-encodedcommand)(?:\s|$)", cmd, re.I):
+        return "Error: inline code execution flags (-c, -e, --eval, -enc) are blocked for safety."
+    argv = (["cmd.exe", "/d", "/s", "/c", cmd] if os_name_is_windows()
+            else ["/bin/sh", "-lc", cmd])
+    proc = subprocess.Popen(argv, shell=False, cwd=str(cwd), stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace")
+                            text=True, encoding="utf-8", errors="replace",
+                            start_new_session=not os_name_is_windows())
     out_chunks: List[str] = []
     err_chunks: List[str] = []
     state = {"last": time.time()}
@@ -384,7 +389,9 @@ def run_shell_command(cmd: str, cwd) -> str:
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                                capture_output=True, timeout=10)
             else:
-                proc.kill()
+                import os
+                import signal
+                os.killpg(proc.pid, signal.SIGKILL)
         except Exception:
             try:
                 proc.kill()

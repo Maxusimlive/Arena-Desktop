@@ -1073,7 +1073,7 @@
         permission_mode: demoStore.permissionMode,
         workspace: demoStore.workspace,
         workspace_chosen: true,
-        app_version: '5.8.1',
+        app_version: '6.0.0',
         pending_permissions: demoStore.pendingPermissions.length,
         demo: true
       };
@@ -3983,6 +3983,31 @@ You can start with a more structured option: one script, short captions, and a c
     return { label: status || "In progress", cls: '' };
   }
 
+  function mcpToolsUsed(activity) {
+    // The agent reaches the Gateway from inside its own bash calls, so the
+    // job payload (server + tool names) is literally in the command text:
+    // job("agent-desktop", [{"tool": "desktop_launch", ...}]). Surface it
+    // as a signature on the card; also honour explicit raw fields.
+    const found = [];
+    const push = (server, tool) => {
+      if (!tool) return;
+      const label = server ? `${server} · ${tool}` : tool;
+      if (!found.includes(label)) found.push(label);
+    };
+    const raw = activity.raw || {};
+    if (raw.mcp_tool || raw.gateway_tool) push(raw.mcp_server || raw.gateway_server || raw.server, raw.mcp_tool || raw.gateway_tool);
+    const text = [activity.command, activity.detail, activity.path].filter(Boolean).join('\n');
+    if (text) {
+      let server = '';
+      const jobCall = text.match(/\bjob\(\s*["']([^"']+)["']/) || text.match(/["']server["']\s*:\s*["']([^"']+)["']/);
+      if (jobCall) server = jobCall[1];
+      if (server || text.includes('/v1/jobs')) {
+        for (const m of text.matchAll(/["']tool["']\s*:\s*["']([^"']+)["']/g)) push(server, m[1]);
+      }
+    }
+    return found;
+  }
+
   function renderActivities(lane, baseKey = '') {
     if (!Array.isArray(lane.activities) || !lane.activities.length) return null;
     const cards = lane.activities.map((activity, activityIndex) => {
@@ -3997,6 +4022,12 @@ You can start with a more structured option: one script, short captions, and a c
         el('span', { class: `activity-status ${status.cls}`, text: status.label })
       );
       const card = el('div', { class: `activity-card${status.cls === 'is-err' ? ' is-danger' : ''}` }, head);
+      const mcpUsed = mcpToolsUsed(activity);
+      if (mcpUsed.length) {
+        const shown = mcpUsed.slice(0, 3).join(', ') + (mcpUsed.length > 3 ? ` +${mcpUsed.length - 3}` : '');
+        card.appendChild(el('div', { class: 'activity-mcp', title: `MCP via Gateway: ${mcpUsed.join(', ')}` },
+          iconEl('plug'), el('span', { text: `MCP: ${shown}` })));
+      }
       if (detail) {
         const isLong = detail.length > 180 || String(activity.status).toLowerCase() === 'running';
         const activityKey = `${baseKey}:activity:${activity.id || activityIndex}:${activity.name || 'action'}`;
@@ -6279,7 +6310,11 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function confirmDeleteChat(chatId) {
-    const chat = state.chats.find((item) => item.id === String(chatId));
+    // Sub-agent chats live nested in their parent's `children`, not in the
+    // top-level list — searching only state.chats made the delete button
+    // on a sub-agent row silently do nothing.
+    const chat = [...state.chats, ...state.chats.flatMap((item) => item.children || [])]
+      .find((item) => item.id === String(chatId));
     if (!chat) return;
     const error = el('p', { class: 'form-error', role: 'alert' });
     const result = mountModal({
@@ -6299,6 +6334,11 @@ You can start with a more structured option: one script, short captions, and a c
             try {
               const outcome = await API.deleteChat(chatId);
               state.chats = state.chats.filter((item) => item.id !== String(chatId));
+              state.chats.forEach((item) => {
+                if (Array.isArray(item.children)) {
+                  item.children = item.children.filter((kid) => kid.id !== String(chatId));
+                }
+              });
               state.cloudChats = (state.cloudChats || []).filter((item) =>
                 String(item.local_chat_id || '') !== String(chatId)
                 && (!chat.eval_id || String(item.eval_id || item.id || '') !== String(chat.eval_id)));
@@ -9864,6 +9904,12 @@ You can start with a more structured option: one script, short captions, and a c
         }, iconEl('x'), el('span', { text: 'Stop & revoke' })));
       } else {
         if (session.error) host.appendChild(el('p', { class: 'modal-note', text: `Last session: ${session.error}` }));
+        if (Array.isArray(session.tunnel_log) && session.tunnel_log.length) {
+          host.appendChild(el('details', { class: 'tunnel-log' },
+            el('summary', { text: 'cloudflared output (last lines)' }),
+            el('pre', { class: 'gateway-mono', text: session.tunnel_log.slice(-25).join('\n') })));
+          host.appendChild(el('p', { class: 'modal-note', text: 'If the tunnel keeps failing, copy this output via Settings → About → Copy diagnostics and send it with your report.' }));
+        }
         const startBtn = el('button', {
           class: 'button', type: 'button', disabled: !data.enabled,
           onclick: async () => {

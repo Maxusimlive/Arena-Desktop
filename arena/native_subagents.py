@@ -70,6 +70,15 @@ class NativeSubagentPool:
                 job['cancel'].set()
             return len(jobs)
 
+    def cancel_child(self, child_id: str) -> bool:
+        """Cancel one running child (e.g. its chat is being deleted)."""
+        with self._lock:
+            job = self._jobs.get(child_id)
+            if job and job['state'] in ('starting', 'running'):
+                job['cancel'].set()
+                return True
+            return False
+
     def cancel_parent(self, parent: str) -> int:
         with self._lock:
             jobs = [job for job in self._jobs.values()

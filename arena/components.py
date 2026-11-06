@@ -110,15 +110,29 @@ def _which(name: str) -> Optional[str]:
 
 
 def cloudflared_path() -> Optional[Path]:
+    candidates: List[Path] = []
     candidate = BIN_DIR / ("cloudflared.exe" if _is_windows() else "cloudflared")
-    if candidate.is_file():
-        return candidate
+    try:
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            candidates.append(candidate)
+    except OSError:
+        pass
     # Also honour a system-wide install (winget, manual, package manager):
     # previously only the app-data copy counted, so a perfectly good
     # cloudflared on PATH was reported missing and the Gateway refused
     # to start with "cloudflared is not installed".
     found = _which("cloudflared")
-    return Path(found) if found else None
+    if found and Path(found) not in candidates:
+        candidates.append(Path(found))
+    if not candidates:
+        return None
+    # Prefer a copy that actually runs: a truncated or wrong-architecture
+    # download in the app folder must not shadow a working system install
+    # (it used to — cloudflared then "exited" instantly with no clue why).
+    for path in candidates:
+        if _run_version([str(path), "--version"], f"cloudflared:{path}"):
+            return path
+    return candidates[0]
 
 
 def _run_version(args: List[str], cache_key: str) -> Optional[str]:
@@ -167,7 +181,7 @@ def detect(refresh: bool = False) -> List[Dict[str, Any]]:
     if refresh:
         _version_cache.clear()
     cf = cloudflared_path()
-    cf_version = _run_version([str(cf), "--version"], "cloudflared") if cf else None
+    cf_version = _run_version([str(cf), "--version"], f"cloudflared:{cf}") if cf else None
     node = _which("node")
     python = _which("py") or _which("python")
     webview2 = _webview2_version()
@@ -269,7 +283,8 @@ def _install_cloudflared() -> None:
             return
         target = BIN_DIR / "cloudflared.exe"
         os.replace(tmp, target)
-        _version_cache.pop("cloudflared", None)
+        for key in [k for k in _version_cache if k.startswith("cloudflared")]:
+            _version_cache.pop(key, None)
         _set_job(cid, state="done", progress=100, error=None)
     except Exception as e:  # network/disk/AV problems: report, never crash
         _set_job(cid, state="error", progress=0, error=f"{type(e).__name__}: {e}")

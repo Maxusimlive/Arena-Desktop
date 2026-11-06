@@ -280,7 +280,7 @@ STATIC_DIR = _base / "arena" / "web" / "static" if getattr(sys, 'frozen', False)
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="/static")
 _API_TOKEN = secrets.token_urlsafe(32)
 
-APP_VERSION = "5.8.1"
+APP_VERSION = "6.0.0"
 
 
 @app.after_request
@@ -1328,6 +1328,7 @@ _SETTINGS_ALLOWLIST = frozenset({
     "workspace_dir", "default_mode", "default_modality", "model_a", "model_b",
     "sidebar_collapsed", "sound", "notifications", "check_updates", "permission_mode",
     "gateway_enabled", "gateway_auto", "gateway_servers", "gateway_workspace",
+    "gateway_tunnel_protocol",
     "update_check", "beta_updates", "elo_enabled", "auto_continue", "notify_sound",
     "pacing", "pacing_preset", "cheap_subagents", "multi_session_subagents",
     "account_failover", "tray_enabled", "layout", "arena_connectors_off",
@@ -1390,7 +1391,10 @@ def api_gateway_start():
     if not servers:
         return jsonify({"error": "Nothing to expose: enable a local MCP server under Connectors (Local MCP) or pick a Workspace folder first.",
                         "code": "no_servers"}), 400
-    status = _gateway().start(servers, wait_seconds=65)
+    status = _gateway().start(servers, wait_seconds=65,
+                              preferred_protocol=_gateway_preferred_protocol(cfg))
+    if status.get("state") == "on":
+        _gateway_learn_protocol(status)
     if status["state"] == "starting":
         return jsonify({"ok": True, "session": status}), 202
     if status["state"] == "needs_cloudflared":
@@ -2052,6 +2056,28 @@ def api_diagnostics():
     upload_lines = _upload_diagnostic_lines()
     lines += ["", "--- Upload attempts, last 20 (metadata only; no names, content, hashes or URLs) ---"]
     lines += upload_lines or ["none recorded in this app session"]
+    # Gateway/cloudflared: when a tunnel will not stay up, cloudflared's own
+    # last lines are the diagnosis — include them (never the pairing code).
+    try:
+        cf_path = components.cloudflared_path()
+        gw = _gateway().status() if _GATEWAY is not None else {}
+        lines += ["", "--- Agent Gateway ---",
+                  f"cloudflared: {cf_path or 'not found'}",
+                  f"Gateway state: {gw.get('state') or 'never started'}",
+                  f"Gateway error: {gw.get('error') or 'none'}",
+                  f"Tunnel protocol: {gw.get('tunnel_protocol') or 'default (quic)'}",
+                  f"Tunnel registered: {gw.get('tunnel_registered')}",
+                  f"Public reachability check (informational): {gw.get('public_check') or 'not run'}"]
+        tunnel_tail = [str(x) for x in (gw.get("tunnel_log") or [])][-25:]
+        lines += ["cloudflared output, last lines:"]
+        lines += [_redact_urls(x) for x in tunnel_tail] or ["(no output captured)"]
+        recent_calls = gw.get("calls") or []
+        if recent_calls:
+            lines += ["", "Recent gateway tool calls (server:tool, result, ms):"]
+            lines += [f"{c.get('server')}:{c.get('tool')} · {'ok' if c.get('ok') else 'failed'} · {c.get('ms')} ms"
+                      for c in recent_calls[:20]]
+    except Exception as e:  # diagnostics must never fail because of this
+        lines += ["", f"--- Agent Gateway ---\n(unavailable: {type(e).__name__})"]
     try:
         tail = (COOKIE_FILE.parent / "desktop.log").read_text(
             encoding="utf-8", errors="replace").splitlines()[-60:]
@@ -3117,6 +3143,12 @@ def api_chat_delete(chat_id):
     if not _validate_chat_id(chat_id) or not (CHATS_DIR / chat_id).is_dir():
         return jsonify({"error": "Chat not found"}), 404
     chat = _load_chat(chat_id) or {}
+    # Deleting a still-running sub-agent's chat stops that child first, so
+    # it cannot recreate or keep writing into a chat that is going away.
+    try:
+        _NATIVE_SUBAGENTS.cancel_child(chat_id)
+    except Exception:
+        pass
     arena_state, arena_error = "none", None
     session_id, agentic = _chat_arena_session(chat)
     if session_id:
@@ -4581,8 +4613,9 @@ def _run_native_child(child_id, task_path, context, cancel):
         mgr = GatewayManager(tool_index=child_index, call_tool=child_call, approve=child_approve,
                              cloudflared_path=components.cloudflared_path, logger=LOG)
         servers = [x for x in _gateway_servers() if x != "subagents"]
-        status = mgr.start(servers, wait_seconds=0)
-        startup_deadline = time.monotonic() + 70
+        status = mgr.start(servers, wait_seconds=0,
+                           preferred_protocol=_gateway_preferred_protocol())
+        startup_deadline = time.monotonic() + 150
         while status.get("state") == "starting" and not combined.is_set() and time.monotonic() < startup_deadline:
             status = mgr.start(servers, wait_seconds=1)
         if combined.is_set():
@@ -4803,6 +4836,25 @@ def _gateway_session_key() -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
+def _gateway_preferred_protocol(cfg=None) -> str | None:
+    return "http2" if (cfg or load_config()).get("gateway_tunnel_protocol") == "http2" else None
+
+
+def _gateway_learn_protocol(status) -> None:
+    """Persist a working HTTP/2 fallback so the next session skips the
+    (on this network, predictably dead) QUIC attempt entirely."""
+    try:
+        if status.get("state") != "on" or status.get("tunnel_protocol") != "http2":
+            return
+        cfg = load_config()
+        if cfg.get("gateway_tunnel_protocol") != "http2":
+            cfg["gateway_tunnel_protocol"] = "http2"
+            save_config(cfg)
+            LOG.info("gateway: remembered http2 as the working tunnel protocol for this network")
+    except Exception:
+        LOG.exception("gateway: could not persist tunnel protocol preference")
+
+
 def _gateway_injection(data, cfg=None) -> str:
     """Protocol block for a native agent session (auto mode), or ''.
 
@@ -4822,8 +4874,11 @@ def _gateway_injection(data, cfg=None) -> str:
         return ""
     mgr = _gateway()
     if mgr.summary()["state"] != "on":
-        status = mgr.start(servers, wait_seconds=70)
-        if status.get("state") != "on":
+        status = mgr.start(servers, wait_seconds=70,
+                           preferred_protocol=_gateway_preferred_protocol(cfg))
+        if status.get("state") == "on":
+            _gateway_learn_protocol(status)
+        else:
             LOG.info("gateway: auto-start did not come up (state=%s, error=%s)",
                      status.get("state"), status.get("error"))
     return mgr.injection_block()

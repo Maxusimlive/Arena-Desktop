@@ -26,7 +26,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional
 
 MAX_BODY = 262144
-MAX_STEPS = 20
+MAX_STEPS = 40
+MAX_WAIT_SECONDS = 90  # stay below Cloudflare's ~100s proxy read timeout
 MAX_OUTPUT = 20000
 _TUNNEL_URL = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 
@@ -63,6 +64,19 @@ class _Handler(BaseHTTPRequestHandler):
             candidate = self.headers.get("X-Arena-Pairing") or ""
         return bool(candidate) and hmac.compare_digest(candidate, token)
 
+    def _wait_seconds(self, payload=None) -> float:
+        raw = None
+        if payload is not None and payload.get("wait_seconds") is not None:
+            raw = payload.get("wait_seconds")
+        elif "?" in self.path:
+            from urllib.parse import parse_qs, urlparse
+            values = parse_qs(urlparse(self.path).query).get("wait")
+            raw = values[0] if values else None
+        try:
+            return max(0.0, min(float(raw), MAX_WAIT_SECONDS)) if raw is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
     def do_GET(self):  # noqa: N802 (stdlib naming)
         path = self.path.split("?", 1)[0]
         if path == "/v1/health":
@@ -75,7 +89,9 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/v1/servers":
             self._json(200, {"ok": True, "servers": self.mgr._public_index()})
         elif path.startswith("/v1/jobs/"):
-            job = self.mgr._jobs.get(path[len("/v1/jobs/"):])
+            job_id = path[len("/v1/jobs/"):]
+            wait = self._wait_seconds()
+            job = self.mgr.wait_job(job_id, wait) if wait else self.mgr._jobs.get(job_id)
             if job is None:
                 self._json(404, {"ok": False, "error": "job not found"})
             else:
@@ -106,8 +122,17 @@ class _Handler(BaseHTTPRequestHandler):
         accepted, error = self.mgr._submit_job(payload)
         if accepted is None:
             self._json(400, {"ok": False, "error": error})
-        else:
-            self._json(202, {"ok": True, "job_id": accepted})
+            return
+        wait = self._wait_seconds(payload)
+        if wait:
+            # Sync mode: hold this one request until the job completes and
+            # answer with the finished job — the agent spends a single tool
+            # call instead of a polling loop of them.
+            job = self.mgr.wait_job(accepted, wait)
+            if job is not None:
+                self._json(200, {"ok": True, **job})
+                return
+        self._json(202, {"ok": True, "job_id": accepted})
 
 
 class GatewayManager:
@@ -138,12 +163,33 @@ class GatewayManager:
         self._tunnel: Optional[subprocess.Popen] = None
         self._ready = threading.Event()
         self._jobs: Dict[str, Dict[str, Any]] = {}
+        self._job_events: Dict[str, threading.Event] = {}
         self._job_queue: deque = deque()
         self._job_cv = threading.Condition()
         self._calls: deque = deque(maxlen=40)
         self._worker: Optional[threading.Thread] = None
         self._watchdog: Optional[threading.Thread] = None
         self._running = False
+        # Diagnostics for a tunnel that will not stay up: the last lines
+        # cloudflared printed (its own error is the whole story — previously
+        # they were read only to spot the tunnel URL and then thrown away,
+        # leaving an opaque "cloudflared exited"), plus retry bookkeeping
+        # for the http2 fallback below.
+        self._tunnel_log: deque = deque(maxlen=60)
+        self._tunnel_protocol: Optional[str] = None
+        self._tunnel_retried = False
+        self._cf_path: Optional[str] = None
+        self._fallback_at: Optional[float] = None
+        self._used_fallback = False
+        # The tunnel is considered live when cloudflared reports a
+        # registered connection AND the local origin answers on loopback.
+        # Verifying through the public URL from this same machine proved
+        # fragile in the field: a flaky local DNS resolver (timeouts seen
+        # in real logs) failed the check for a full minute and killed
+        # tunnels that were perfectly reachable for the remote agent,
+        # which resolves the address from Arena's side anyway.
+        self._tunnel_registered = False
+        self._public_check: Optional[str] = None
 
     # ---------- status ----------
     def summary(self) -> Dict[str, Any]:
@@ -155,6 +201,12 @@ class GatewayManager:
             "state": self._state, "url": self._url, "servers": list(self._servers),
             "started_at": self._created or None, "expires_at": self._expires or None,
             "error": self._last_error, "calls": list(reversed(self._calls)),
+            "tunnel_log": list(self._tunnel_log),
+            "tunnel_protocol": self._tunnel_protocol,
+            "cloudflared": self._cf_path,
+            "used_fallback": self._used_fallback,
+            "tunnel_registered": self._tunnel_registered,
+            "public_check": self._public_check,
         }
         if include_pairing and self._state == "on":
             out["pairing"] = self._token
@@ -176,7 +228,8 @@ class GatewayManager:
     # ---------- lifecycle ----------
     def start(self, servers: List[str], *, idle_minutes: int = 45,
               hard_hours: int = 8, wait_seconds: float = 45,
-              tunnel: bool = True) -> Dict[str, Any]:
+              tunnel: bool = True,
+              preferred_protocol: Optional[str] = None) -> Dict[str, Any]:
         # A second caller joins the existing start instead of creating another
         # HTTP server/tunnel and orphaning the first one.
         with self._start_lock:
@@ -195,6 +248,17 @@ class GatewayManager:
                 generation = self._generation
                 self._state = "starting"
                 self._last_error = None
+                self._tunnel_log.clear()
+                # A network where QUIC already proved dead starts directly
+                # on HTTP/2 (the caller persists this preference); the one
+                # allowed fallback is then already spent.
+                self._tunnel_retried = preferred_protocol == "http2"
+                self._tunnel_protocol = None
+                self._fallback_at = None
+                self._used_fallback = False
+                self._tunnel_registered = False
+                self._public_check = None
+                self._cf_path = str(cf) if cf else None
                 self._servers = list(servers)
                 self._token = secrets.token_urlsafe(32)
                 self._created = time.time()
@@ -209,7 +273,8 @@ class GatewayManager:
                     self._worker = threading.Thread(target=self._worker_loop, args=(generation,), daemon=True)
                     self._worker.start()
                     if tunnel:
-                        self._start_tunnel(str(cf), generation)
+                        self._start_tunnel(str(cf), generation,
+                                           protocol="http2" if preferred_protocol == "http2" else None)
                     else:
                         self._url = f"http://127.0.0.1:{self._http.server_address[1]}"
                         self._state = "on"
@@ -222,7 +287,19 @@ class GatewayManager:
             ready = self._ready
         # The caller's patience is not the tunnel's deadline. Continue probing
         # in the background; never mark ready without a successful health check.
-        ready.wait(max(0.0, wait_seconds))
+        # If the QUIC attempt falls back to HTTP/2 mid-wait, the fallback gets
+        # its own full budget — otherwise the caller gives up ("state=
+        # starting") seconds before the healthy http2 tunnel is verified.
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        while not ready.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if ready.wait(min(remaining, 2.0)):
+                break
+            with self._start_lock:
+                if self._fallback_at and self._fallback_at + wait_seconds > deadline:
+                    deadline = self._fallback_at + wait_seconds
         return self.status(include_pairing=True)
 
     def stop(self, reason: str = "stopped") -> Dict[str, Any]:
@@ -266,6 +343,9 @@ class GatewayManager:
                 if job.get("status") in ("queued", "running"):
                     job["status"] = "error"
                     job["error"] = "gateway session ended"
+                    event = self._job_events.get(job.get("job_id"))
+                    if event is not None:
+                        event.set()
 
     def _start_http(self) -> None:
         server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
@@ -274,13 +354,24 @@ class GatewayManager:
         self._http = server
         threading.Thread(target=server.serve_forever, daemon=True).start()
 
-    def _start_tunnel(self, cf: str, generation: int) -> None:
+    def _start_tunnel(self, cf: str, generation: int, protocol: Optional[str] = None) -> None:
         port = self._http.server_address[1]
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        args = [cf, "tunnel", "--url", f"http://127.0.0.1:{port}", "--no-autoupdate"]
+        if protocol:
+            args += ["--protocol", protocol]
+        self._tunnel_protocol = protocol
+        # Binary pipe, decoded by hand below: with text=True the pipe uses
+        # the Windows locale encoding (cp1251 on Russian systems) while
+        # cloudflared writes UTF-8 (interface names, box-drawing table
+        # borders). An undecodable byte killed the reader thread with
+        # UnicodeDecodeError, the dead reader was mistaken for a dead
+        # process, and the gateway tore down a perfectly healthy tunnel
+        # with a baffling, error-free "cloudflared exited".
         proc = subprocess.Popen(
-            [cf, "tunnel", "--url", f"http://127.0.0.1:{port}", "--no-autoupdate"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            bufsize=1, creationflags=flags)
+            args,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            bufsize=0, creationflags=flags)
         self._tunnel = proc
         threading.Thread(target=self._tunnel_reader, args=(proc, generation), daemon=True).start()
 
@@ -288,7 +379,13 @@ class GatewayManager:
         if proc.stdout is None:
             return
         try:
-            for line in proc.stdout:
+            for raw in proc.stdout:
+                line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else (raw or "")
+                clean = line.rstrip("\r\n")
+                if self._token:
+                    clean = clean.replace(self._token, "***")
+                if clean.strip():
+                    self._tunnel_log.append(clean[-500:])
                 with self._start_lock:
                     if generation != self._generation or not self._running:
                         return
@@ -298,11 +395,131 @@ class GatewayManager:
                         self._info("tunnel address assigned; checking health")
                         threading.Thread(target=self._probe_tunnel,
                                          args=(self._url, generation), daemon=True).start()
+                    if "Registered tunnel connection" in line and not self._tunnel_registered:
+                        self._tunnel_registered = True
+                        self._info("tunnel connection registered; verifying local gateway")
+                        threading.Thread(target=self._verify_registered,
+                                         args=(generation,), daemon=True).start()
         except Exception:
             pass
+        # EOF on the pipe normally means the process ended, but if it is
+        # somehow still alive (reader broke early), wait for the real exit
+        # instead of reporting a phantom one with code None.
+        try:
+            returncode = proc.wait(timeout=15)
+        except Exception:
+            returncode = proc.poll()
         with self._start_lock:
-            if generation == self._generation and self._running:
-                self.stop("cloudflared exited")
+            if generation != self._generation or not self._running:
+                return
+            if self._tunnel is not proc:
+                return  # superseded by a fallback restart; that reader owns the session now
+            # Quick Tunnels speak QUIC (UDP 7844) by default. Plenty of ISPs
+            # and routers let the tiny pre-check probes through and then
+            # throttle or NAT-timeout the sustained tunnel: cloudflared gets
+            # its address, retries registration against a dead QUIC stream
+            # ("no recent network activity") and exits. So the HTTP/2
+            # fallback applies whenever the tunnel dies before the session
+            # was ever verified healthy — address assigned or not.
+            if self._state == "starting" and self._fallback_to_http2(generation, proc):
+                return
+            tail = [line for line in list(self._tunnel_log)[-3:] if line.strip()]
+            detail = " | ".join(tail)[-400:]
+            reason = f"cloudflared exited (code {returncode})"
+            if detail:
+                reason += f": {detail}"
+            for line in tail:
+                self._info(f"cloudflared: {line}")
+            self.stop(reason)
+
+    def _fallback_to_http2(self, generation: int, dying=None) -> bool:
+        """Restart a never-verified tunnel once over HTTP/2 (TCP 443).
+
+        Caller must hold _start_lock. Returns True when the session was
+        handed to a fresh http2 tunnel. The dead/unhealthy QUIC address is
+        dropped so nothing can advertise or probe it any more.
+        """
+        if (generation != self._generation or not self._running
+                or self._state != "starting" or self._tunnel_retried
+                or not self._cf_path):
+            return False
+        self._tunnel_retried = True
+        self._used_fallback = True
+        self._fallback_at = time.monotonic()
+        self._tunnel_registered = False
+        self._public_check = None
+        old, self._tunnel = self._tunnel, None
+        self._url = None
+        self._created = time.time()  # restart the watchdog's no-address clock
+        self._info("QUIC tunnel did not become healthy; retrying with --protocol http2")
+        self._tunnel_log.append("[gateway] QUIC tunnel unhealthy; retrying with --protocol http2")
+        if old is not None and old is not dying:
+            try:
+                old.terminate()
+            except Exception:
+                pass
+        try:
+            self._start_tunnel(self._cf_path, generation, protocol="http2")
+            return True
+        except Exception as e:
+            self._tunnel_log.append(f"[gateway] http2 retry failed to start: {e}")
+            return False
+
+    def _origin_ok(self) -> bool:
+        """Health of the local gateway HTTP server over loopback (no DNS,
+        no tunnel) — the part of the chain this process actually controls."""
+        server = self._http
+        if server is None:
+            return False
+        try:
+            port = server.server_address[1]
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/health", timeout=3) as resp:
+                payload = json.loads(resp.read(4096))
+                return resp.status == 200 and payload.get("ok") is True \
+                    and payload.get("service") == "arena-desktop-gateway"
+        except Exception:
+            return False
+
+    def _verify_registered(self, generation: int) -> None:
+        """Registered tunnel + answering origin = session on. The public
+        probe still runs (once, recorded for diagnostics) but no longer
+        gates the session: from a machine with flaky DNS it kept failing
+        for a minute and tearing down tunnels the agent could reach fine.
+        """
+        for _ in range(20):
+            with self._start_lock:
+                if generation != self._generation or not self._running:
+                    return
+                if self._state == "on":
+                    return
+            if self._origin_ok():
+                with self._start_lock:
+                    if generation != self._generation or not self._running \
+                            or self._state != "starting" or not self._url:
+                        return
+                    self._state = "on"
+                    self._last_error = None
+                    self._ready.set()
+                    self._touch()
+                    url = self._url
+                self._info("gateway on (registered tunnel, local origin healthy)")
+                threading.Thread(target=self._public_probe_once,
+                                 args=(url, generation), daemon=True).start()
+                return
+            time.sleep(0.5)
+
+    def _public_probe_once(self, url: str, generation: int) -> None:
+        try:
+            with urllib.request.urlopen(f"{url}/v1/health", timeout=8) as resp:
+                payload = json.loads(resp.read(4096))
+                ok = resp.status == 200 and payload.get("ok") is True \
+                    and payload.get("service") == "arena-desktop-gateway"
+            result = "ok" if ok else "unexpected response"
+        except Exception as e:
+            result = f"failed: {type(e).__name__}"
+        with self._start_lock:
+            if generation == self._generation:
+                self._public_check = result
 
     def _probe_tunnel(self, url: str, generation: int) -> None:
         deadline = time.monotonic() + 60
@@ -310,6 +527,8 @@ class GatewayManager:
             with self._start_lock:
                 if generation != self._generation or not self._running:
                     return
+                if self._url != url:
+                    return  # a fallback restart owns the session now
             try:
                 with urllib.request.urlopen(f"{url}/v1/health", timeout=5) as resp:
                     payload = json.loads(resp.read(4096))
@@ -328,6 +547,13 @@ class GatewayManager:
             time.sleep(1.5)
         with self._start_lock:
             if generation == self._generation and self._running and self._state == "starting":
+                if self._tunnel_registered:
+                    return  # registered tunnels are verified on the local path
+                # 60s of failed health checks on a tunnel that never came
+                # up is the same QUIC failure class, just slower: fall back
+                # before giving up entirely.
+                if self._fallback_to_http2(generation):
+                    return
                 self.stop("tunnel health check failed; check cloudflared and network")
 
     def _watchdog_loop(self, generation: int) -> None:
@@ -341,26 +567,27 @@ class GatewayManager:
                     self.stop("session expired")
                     return
                 if self._state == "starting" and not self._url and time.time() - self._created > 60:
+                    if self._fallback_to_http2(generation):
+                        continue
                     self.stop("cloudflared did not provide an address")
                     return
                 if self._state == "on" and time.time() - self._last_activity > self._idle_seconds:
                     self.stop("idle timeout")
                     return
-                url = self._url if self._state == "on" and self._tunnel else None
-            if not url or time.monotonic() - last_probe < 15:
+                active = self._state == "on"
+            if not active or time.monotonic() - last_probe < 15:
                 continue
             last_probe = time.monotonic()
-            try:
-                with urllib.request.urlopen(f"{url}/v1/health", timeout=5) as resp:
-                    payload = json.loads(resp.read(4096))
-                    healthy = resp.status == 200 and payload.get("ok") is True and payload.get("service") == "arena-desktop-gateway"
-            except Exception:
-                healthy = False
+            # Watch the part this process controls. The public path is at
+            # the mercy of the local DNS resolver (see _verify_registered)
+            # and cloudflared's own exit — reported by its reader — covers
+            # tunnel death; a dead origin is the remaining real failure.
+            healthy = self._origin_ok()
             failures = 0 if healthy else failures + 1
             if failures >= 3:
                 with self._start_lock:
                     if generation == self._generation and self._running:
-                        self.stop("tunnel lost health checks; restart the session")
+                        self.stop("local gateway server stopped responding")
                 return
 
     # ---------- tool index / jobs ----------
@@ -414,13 +641,36 @@ class GatewayManager:
                "results": [], "error": None, "created_at": time.time()}
         with self._lock:
             self._jobs[job_id] = job
+            self._job_events[job_id] = threading.Event()
             while len(self._jobs) > 50:
-                self._jobs.pop(next(iter(self._jobs)), None)
+                oldest = next(iter(self._jobs))
+                self._jobs.pop(oldest, None)
+                self._job_events.pop(oldest, None)
         with self._job_cv:
             self._job_queue.append((job, clean_steps))
             self._job_cv.notify()
         self._touch()
         return job_id, None
+
+    def wait_job(self, job_id: str, seconds: float) -> Optional[Dict[str, Any]]:
+        """Block until the job finishes or the timeout passes; returns the
+        job either way (None if unknown). This is what makes the sync
+        ``?wait=`` mode possible: one agent request, one response with the
+        result, instead of a poll loop of separate agent tool calls."""
+        with self._lock:
+            event = self._job_events.get(job_id)
+            job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        if event is not None and seconds > 0:
+            event.wait(min(float(seconds), MAX_WAIT_SECONDS))
+        return job
+
+    def _signal_job(self, job: Dict[str, Any]) -> None:
+        with self._lock:
+            event = self._job_events.get(job.get("job_id"))
+        if event is not None:
+            event.set()
 
     def _worker_loop(self, generation: int) -> None:
         while self._running and generation == self._generation:
@@ -441,6 +691,7 @@ class GatewayManager:
             if not self._running or generation != self._generation:
                 job["status"] = "error"
                 job["error"] = "gateway session ended"
+                self._signal_job(job)
                 return
             self._touch()
             started = time.time()
@@ -455,6 +706,7 @@ class GatewayManager:
             elif generation != self._generation or not self._running:
                 job["status"] = "error"
                 job["error"] = "gateway session ended"
+                self._signal_job(job)
                 return
             else:
                 try:
@@ -474,8 +726,10 @@ class GatewayManager:
         if generation != self._generation or not self._running:
             job["status"] = "error"
             job["error"] = "gateway session ended"
+            self._signal_job(job)
             return
         job["status"] = "done" if all(r["ok"] for r in job["results"]) else "error"
+        self._signal_job(job)
         self._touch()
 
     # ---------- agent-facing instructions ----------
@@ -501,14 +755,18 @@ class GatewayManager:
             f"Gateway URL: {self._url}\n"
             f"Pairing code (secret — never repeat it in your replies): {self._token}\n"
             "How to use:\n"
-            "1. GET {url}/v1/health and expect {\"ok\": true}.\n"
-            "2. GET {url}/v1/servers with header 'Authorization: Bearer <code>' to list "
-            "servers, tools and their JSON input schemas.\n"
-            "3. POST {url}/v1/jobs with the same header and body "
-            "{\"server\": \"<name>\", \"steps\": [{\"tool\": \"<tool>\", \"arguments\": {...}}]} "
-            "→ returns {\"job_id\": \"...\"}.\n"
-            "4. GET {url}/v1/jobs/<job_id> until status is \"done\" or \"error\"; "
-            "use results[].output.\n"
+            "1. GET {url}/v1/servers with header 'Authorization: Bearer <code>' ONCE to list "
+            "servers, tools and their JSON input schemas (it does not change during the session; "
+            "do not re-fetch it per job, and you may skip the health check).\n"
+            "2. Run work synchronously: POST {url}/v1/jobs?wait=60 with the same header, a client "
+            "timeout of at least 90 seconds, and body "
+            "{\"server\": \"<name>\", \"steps\": [{\"tool\": \"<tool>\", \"arguments\": {...}}]}. "
+            "The response IS the finished job (status \"done\"/\"error\", results[].output) — "
+            "one call, no polling. Only if the response status is still \"running\", poll "
+            "GET {url}/v1/jobs/<job_id>?wait=60 the same way.\n"
+            "3. Batch aggressively: put every related step in ONE job's steps (up to 40), and "
+            "for shell work prefer a single run_cmd with a compound command over many small "
+            "calls. Every separate request costs you a full round trip.\n"
             f"Servers available right now: {counts}.\n"
             + workspace_line +
             "Rules: use these tools only when the task needs something on the user's "

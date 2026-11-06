@@ -4120,7 +4120,7 @@ def test_native_subagents_use_distinct_gateways_and_file_bridge(web, monkeypatch
         def __init__(self, **kw):
             self.number = len(seen) + 1
             seen.append(self)
-        def start(self, servers, wait_seconds):
+        def start(self, servers, wait_seconds=0, **kwargs):
             assert servers == ['workspace']
             return {'state': 'on', 'pairing': f'child-secret-{self.number}'}
         def injection_block(self):

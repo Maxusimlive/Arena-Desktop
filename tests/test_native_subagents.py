@@ -57,6 +57,21 @@ def test_cancel_is_parent_scoped_and_no_error_secret_leaks():
     assert 'secret-gateway-token' not in str(pool.status('a'))
 
 
+def test_cancel_child_stops_only_that_child():
+    entered = threading.Event()
+    def run(child, task, context, cancel):
+        entered.set()
+        assert cancel.wait(3)
+        return ''
+    pool = NativeSubagentPool(run)
+    first = pool.launch('p', 'a.txt', {})
+    assert entered.wait(2)
+    assert pool.cancel_child('nonexistent') is False
+    assert pool.cancel_child(first['child_id']) is True
+    wait_until(lambda: pool.status('p')[0]['state'] == 'cancelled')
+    assert pool.cancel_child(first['child_id']) is False  # already finished
+
+
 def test_control_requires_capability_and_confines_task_file(tmp_path, monkeypatch):
     from arena.web import app as web
     monkeypatch.setattr(web, '_chosen_ws', lambda: tmp_path)

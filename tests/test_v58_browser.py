@@ -121,6 +121,83 @@ def test_all_installed_no_startup_prompt_and_check_again_refreshes(site):
         browser.close()
 
 
+def test_gateway_panel_shows_cloudflared_output_after_failure(site):
+    sync_api = pytest.importorskip('playwright.sync_api')
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+        page = browser.new_page(viewport={'width': 1400, 'height': 950})
+        def api(route):
+            path = route.request.url.split('?', 1)[0].split('/api/', 1)[1]
+            if path == 'gateway':
+                return route.fulfill(json={
+                    'enabled': True, 'auto': True, 'chosen': [], 'available': [],
+                    'workspace': {'exposed': True, 'available': True, 'folder': 'C:/work'},
+                    'session': {'state': 'off', 'url': None, 'servers': [],
+                                'error': 'cloudflared exited (code 1): ERR quic blocked',
+                                'tunnel_log': ['ERR quic blocked', '[gateway] retrying with --protocol http2',
+                                               'ERR http2 also blocked']}})
+            values = {'status': {'authenticated': True, 'desktop': True, 'mode': 'direct', 'modality': 'text'},
+                      'components': {'components': [{'id': 'cloudflared', 'name': 'cloudflared', 'installed': True}], 'jobs': {}},
+                      'settings': {}, 'chats': [], 'models': [], 'permissions': [],
+                      'permission-mode': {'mode': 'default'}, 'questions': [], 'media-choices': [], 'workspace': {}}
+            return route.fulfill(status=200, content_type='application/json', body=json.dumps(values.get(path, {'ok': True})))
+        page.route('**/api/**', api)
+        page.goto(site, wait_until='networkidle')
+        page.locator('[data-action="settings"]').first.click()
+        page.locator('#settings-tab-gateway').click()
+        panel = page.locator('.settings-panels')
+        panel.get_by_text('cloudflared exited (code 1): ERR quic blocked', exact=False).wait_for(timeout=10000)
+        panel.locator('.tunnel-log summary').click()
+        assert 'http2 also blocked' in panel.locator('.tunnel-log pre').inner_text()
+        browser.close()
+
+
+def test_mcp_signature_on_bash_card_and_subagent_chat_delete(site):
+    sync_api = pytest.importorskip('playwright.sync_api')
+    deleted = []
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+        page = browser.new_page(viewport={'width': 1400, 'height': 950})
+        cmd = 'python3 gw.py job("agent-desktop",[{"tool":"desktop_launch","arguments":{}},{"tool":"desktop_screenshot","arguments":{}}])'
+        def api(route):
+            path = route.request.url.split('?', 1)[0].split('/api/', 1)[1]
+            if path == 'chats/c1/delete':
+                deleted.append(path)
+                return route.fulfill(json={'ok': True, 'arena': 'none'})
+            if path == 'chats':
+                kids = [] if deleted else [{'id': 'c1', 'title': 'Sub child', 'mode': 'agent'}]
+                return route.fulfill(json={'chats': [{'id': 'm1', 'title': 'MCP chat', 'mode': 'agent',
+                                                      'children': kids}]})
+            if path == 'chats/m1':
+                return route.fulfill(json={'id': 'm1', 'title': 'MCP chat', 'mode': 'agent',
+                                           'children': [{'id': 'c1', 'title': 'Sub child', 'mode': 'agent'}]})
+            if path == 'history':
+                return route.fulfill(json={'messages': [
+                    {'role': 'user', 'text': 'go'},
+                    {'role': 'assistant', 'text': 'working', 'text_b': '', 'sandbox': [
+                        {'name': 'bash', 'command': cmd, 'ok': True}]}]})
+            values = {'status': {'authenticated': True, 'desktop': True, 'mode': 'agent', 'modality': 'text'},
+                      'components': {'components': [{'id': 'cloudflared', 'name': 'cloudflared', 'installed': True}], 'jobs': {}},
+                      'settings': {}, 'models': [], 'permissions': [],
+                      'permission-mode': {'mode': 'default'}, 'questions': [], 'media-choices': [], 'workspace': {},
+                      'chats/m1/native-subagents': {'children': []}}
+            return route.fulfill(status=200, content_type='application/json', body=json.dumps(values.get(path, {'ok': True})))
+        page.route('**/api/**', api)
+        page.goto(site, wait_until='networkidle')
+        page.locator('[data-chat-open="m1"]').first.click()
+        mcp = page.locator('.activity-mcp')
+        mcp.wait_for(timeout=10000)
+        assert 'agent-desktop · desktop_launch' in mcp.inner_text()
+        assert 'desktop_screenshot' in mcp.inner_text()
+        # Deleting the nested sub-agent chat opens the dialog and calls the API.
+        page.locator('[data-chat-delete="c1"]').dispatch_event('click')
+        page.get_by_text('Delete chat?').wait_for(timeout=10000)
+        page.get_by_role('button', name='Delete', exact=True).click()
+        page.wait_for_function("() => !document.body.innerText.includes('Sub child')", timeout=10000)
+        assert deleted == ['chats/c1/delete']
+        browser.close()
+
+
 def test_first_run_lists_components_and_only_installs_when_clicked(site):
     sync_api = pytest.importorskip('playwright.sync_api')
     installs = []

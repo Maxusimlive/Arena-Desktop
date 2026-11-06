@@ -47,6 +47,29 @@ def test_detect_refresh_drops_version_cache(tmp_path, monkeypatch):
     assert fresh["installed"] is True and fresh["version"] != "v0-stale"
 
 
+def test_broken_app_copy_does_not_shadow_working_system_cloudflared(tmp_path, monkeypatch):
+    import stat
+    import sys
+
+    if sys.platform.startswith("win"):
+        import pytest
+        pytest.skip("POSIX fake cloudflared scripts")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    broken = bindir / "cloudflared"
+    broken.write_text("#!/bin/sh\nexit 1\n")
+    broken.chmod(broken.stat().st_mode | stat.S_IEXEC)
+    tool_dir = tmp_path / "tools"
+    tool_dir.mkdir()
+    good = tool_dir / "cloudflared"
+    good.write_text("#!/bin/sh\necho 'cloudflared version 9.9.9'\n")
+    good.chmod(good.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setattr(components, "BIN_DIR", bindir)
+    monkeypatch.setenv("PATH", str(tool_dir))
+    components._version_cache.clear()
+    assert components.cloudflared_path() == good
+
+
 def test_windows_registry_paths_merged(monkeypatch):
     entries = components._windows_registry_paths()
     if components._is_windows():

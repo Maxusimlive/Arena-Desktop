@@ -451,7 +451,7 @@ def main():
             return
 
     import webview
-    from arena import contracts
+    from arena import contracts, google_ai
     from arena.config import CONFIG_DIR
     from arena.engine import ENGINE
     from arena.web import app as web_app
@@ -511,6 +511,10 @@ def main():
     # Keep the Arena WebView as a genuine top-level window. Login, OAuth and
     # human checks need a separate window rather than a reparented child view.
     ENGINE.dock = None
+    google_win = webview.create_window("Google AI mode - Arena Desktop", "about:blank", width=1100, height=760,
+                                       x=140, y=140, hidden=True, background_color="#242422")
+    google_ai.ENGINE.attach(google_win, main_win)
+    web_app.GOOGLE_ENGINE = google_ai.ENGINE
     main_win.events.closed += lambda *a: os._exit(0)
     # Optional tray life: close hides to the tray; Ctrl+Alt+A toggles the window.
     tray = None

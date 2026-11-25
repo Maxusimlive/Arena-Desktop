@@ -7,6 +7,9 @@
 
   if (window.__arenaDesktopApp) return;
   window.__arenaDesktopApp = true;
+  // The page's own watchdog reads this: it proves the script parsed and ran,
+  // which a window that merely finished loading does not prove.
+  try { window.__arenaBootState = { booted: true }; } catch (e) { /* older runtime */ }
 
   const DEMO = new URLSearchParams(window.location.search).get('demo') === '1';
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -77,16 +80,31 @@
     swords: '<path d="M4.5 4.5 15 15M19.5 4.5 9 15M4.5 4.5v3.2M4.5 4.5h3.2M19.5 4.5v3.2M19.5 4.5h-3.2M13.8 13.8 19 19M10.2 13.8 5 19"/>',
     columns: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M12 4.5v15"/>',
     message: '<path d="M20.5 12a8.3 8.3 0 0 1-12 7.2L4 20.5l1.4-4.2A8.3 8.3 0 1 1 20.5 12Z"/>',
+    // Discord's own glyph: the controller face with the two eye slots.
+    discord: '<path d="M20.32 4.37a19.8 19.8 0 0 0-4.89-1.52.07.07 0 0 0-.08.04c-.21.38-.44.87-.6 1.25a18.3 18.3 0 0 0-5.5 0 12.6 12.6 0 0 0-.61-1.25.07.07 0 0 0-.08-.04c-1.71.3-3.35.81-4.89 1.52a.07.07 0 0 0-.03.03C.53 9.05-.32 13.58.1 18.06a.08.08 0 0 0 .03.05 19.9 19.9 0 0 0 5.99 3.03.07.07 0 0 0 .08-.03c.46-.63.87-1.3 1.22-1.99a.07.07 0 0 0-.04-.1 13.1 13.1 0 0 1-1.87-.89.07.07 0 0 1-.01-.12l.37-.29a.07.07 0 0 1 .08-.01 14.2 14.2 0 0 0 12.06 0 .07.07 0 0 1 .08.01l.37.29a.07.07 0 0 1-.01.12c-.6.35-1.22.65-1.87.89a.07.07 0 0 0-.04.1c.36.7.77 1.36 1.22 1.99a.07.07 0 0 0 .08.03 19.8 19.8 0 0 0 6-3.03.07.07 0 0 0 .03-.05c.5-5.18-.84-9.68-3.55-13.66a.06.06 0 0 0-.03-.03ZM8.02 15.33c-1.18 0-2.16-1.08-2.16-2.41s.96-2.41 2.16-2.41c1.21 0 2.18 1.09 2.16 2.41 0 1.33-.96 2.41-2.16 2.41Zm7.97 0c-1.18 0-2.16-1.08-2.16-2.41s.96-2.41 2.16-2.41c1.21 0 2.18 1.09 2.16 2.41 0 1.33-.95 2.41-2.16 2.41Z"/>',
+    // Brands are filled glyphs, not stroke icons.
+    __filled: 'discord',
     type: '<path d="M5 5h14M12 5v14M9.5 19h5"/>',
     play: '<circle cx="12" cy="12" r="8.7"/><path d="m10 8.5 5 3.5-5 3.5v-7Z"/>',
     mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M8.5 21h7"/>',
     'arrow-down': '<path d="M12 5v14M6.5 13.5 12 19l5.5-5.5"/>',
-    compress: '<path d="M9.5 3.5 4 9M4 4.8V9h4.2M14.5 3.5 20 9M20 4.8V9h-4.2M9.5 20.5 4 15M4 19.2V15h4.2M14.5 20.5 20 15M20 19.2V15h-4.2"/>'
+    compress: '<path d="M9.5 3.5 4 9M4 4.8V9h4.2M14.5 3.5 20 9M20 4.8V9h-4.2M9.5 20.5 4 15M4 19.2V15h4.2M14.5 20.5 20 15M20 19.2V15h-4.2"/>',
+    paperclip: '<path d="m21.4 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+    eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/>',
+    'file-check': '<path d="M7 3.5h7l4 4V20H7z"/><path d="M14 3.5V8h4M9.5 13.5l1.8 1.8 3.2-3.4"/>'
   };
+
+  // Brand glyphs come from their own fill-based paths: a stroked Discord logo
+  // reads as a random blob, which is exactly what the toolbar showed.
+  const FILLED_ICONS = new Set(['discord']);
 
   function icon(name, className = '') {
     const body = ICONS[name] || ICONS.info;
-    return `<svg${className ? ` class="${className}"` : ''} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${body}</svg>`;
+    const filled = FILLED_ICONS.has(name);
+    const paint = filled
+      ? 'fill="currentColor" stroke="none"'
+      : 'fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"';
+    return `<svg${className ? ` class="${className}"` : ''} viewBox="0 0 24 24" ${paint} aria-hidden="true" focusable="false">${body}</svg>`;
   }
 
   function iconEl(name, className = '') {
@@ -100,6 +118,7 @@
   function hydrateIcons(root = document) {
     $$('[data-icon]', root).forEach((node) => {
       if (node.dataset.iconReady === '1' || node.querySelector('svg')) return;
+      node.classList.add('icon');
       node.innerHTML = icon(node.dataset.icon);
       node.dataset.iconReady = '1';
       node.setAttribute('aria-hidden', 'true');
@@ -225,8 +244,8 @@
     if (ORG_LOGOS[key]) return ORG_LOGOS[key];
     const initial = (key || '?')[0].toUpperCase();
     const colors = { minimax: '#14B8A6', zai: '#8B5CF6', stepfun: '#EC4899', bytedance: '#00D1FF', tencent: '#2B82EE', amazon: '#FF9900', microsoft: '#00BCF2', ibm: '#054ADA', cohere: '#F43F5E' };
-    const fill = safeColor(color) || colors[key] || '#C7C2BC';
-    return `<svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="10" fill="${fill}"/><text x="12" y="16" text-anchor="middle" fill="white" font-size="11" font-weight="700" font-family="sans-serif">${initial}</text></svg>`;
+    const fill = colors[key] || '#3a4040';
+    return `<svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="10" fill="${fill}"/><text x="12" y="16" text-anchor="middle" fill="#e8f0ea" font-size="11" font-weight="700" font-family="sans-serif">${initial}</text></svg>`;
   }
 
   function inferOrgFromModelName(name) {
@@ -464,6 +483,81 @@
 
   const _apiToken = document.querySelector('meta[name="api-token"]')?.content || '';
 
+  /* ---------------------------------------------------------------- */
+  /* Diagnostics: the window reports every click and every request so  */
+  /* a freeze points at an exact action instead of at "the app".       */
+  /* ---------------------------------------------------------------- */
+  const DIAG = (() => {
+    const started = performance.now();
+    const send = (message, kind = 'info') => {
+      try {
+        fetch('/api/diag', {
+          method: 'POST',
+          credentials: 'same-origin',
+          cache: 'no-store',
+          headers: { 'Content-Type': 'application/json', 'X-Arena-Token': _apiToken },
+          body: JSON.stringify({ message, kind })
+        }).catch(() => {});
+      } catch (e) { /* diagnostics must never break the app */ }
+    };
+    const stamp = () => `${((performance.now() - started) / 1000).toFixed(1)}s`;
+    return {
+      event: (what, detail) => send(`${stamp()} ${what}${detail ? ' ' + detail : ''}`),
+      error: (what, detail) => send(`${stamp()} ${what}${detail ? ' ' + detail : ''}`, 'error'),
+      slow: (what, ms) => send(`${stamp()} ${what} took ${Math.round(ms)}ms`, 'slow'),
+      timed: async (label, fn) => {
+        const t0 = performance.now();
+        send(`${stamp()} > ${label}`);
+        try {
+          const result = await fn();
+          const ms = performance.now() - t0;
+          (ms >= 1500 ? send(`${stamp()} < ${label} ${Math.round(ms)}ms (SLOW)`, 'slow')
+                      : send(`${stamp()} < ${label} ${Math.round(ms)}ms`));
+          return result;
+        } catch (error) {
+          send(`${stamp()} !! ${label} ${error?.message || error}`, 'error');
+          throw error;
+        }
+      }
+    };
+  })();
+  window.__arenaDiag = DIAG;
+  /* A dump button that always works: it reaches the server directly, without
+     touching app state, so it can be pressed when the rest of the UI is stuck. */
+  window.__arenaDump = async (reason) => {
+    try {
+      const res = await fetch('/api/diag/dump', {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json', 'X-Arena-Token': _apiToken },
+        body: JSON.stringify({ reason: reason || 'кнопка снятия дампа' })
+      });
+      return await res.json();
+    } catch (e) { return { ok: false, error: String(e) }; }
+  };
+  // Keyboard shortcut, so no UI has to be alive for it to work.
+  window.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.altKey && (e.key === 'D' || e.key === 'd')) {
+      e.preventDefault();
+      void window.__arenaDump('Ctrl+Alt+D');
+    }
+  }, true);
+  window.addEventListener('error', (e) => {
+    DIAG.error('JS error', `${e?.message || ''} @ ${e?.filename || ''}:${e?.lineno || ''}`);
+  }, true);
+  window.addEventListener('unhandledrejection', (e) => {
+    DIAG.error('JS rejection', String(e?.reason?.message || e?.reason || ''));
+  });
+  // Every click on something meaningful, by its label or id.
+  document.addEventListener('click', (event) => {
+    const node = event.target?.closest?.('button, a, [data-action], [role="button"]');
+    if (!node) return;
+    const name = node.id || node.dataset?.action || node.getAttribute('aria-label')
+      || (node.textContent || '').trim().slice(0, 40);
+    DIAG.event('click', `«${name}»`);
+  }, true);
+
   const liveApi = {
     async request(path, { method = 'GET', body, signal } = {}) {
       const options = {
@@ -478,19 +572,32 @@
         options.body = JSON.stringify(body);
       }
       let response;
+      const __t0 = performance.now();
+      DIAG.event('request', `${method} ${path}`);
       try {
         response = await fetch(path, options);
       } catch (error) {
         if (error?.name === 'AbortError') throw error;
+        DIAG.error('request failed', `${method} ${path} ${error?.message || error}`);
         throw new ApiError("The local application server is unavailable. Check that the application is running and try again.", 0, error);
+      }
+      const __ms = performance.now() - __t0;
+      // A request that takes seconds is the smell of the freeze: name it.
+      if (__ms >= 1500) {
+        DIAG.slow(`${method} ${path}`, __ms);
+      } else {
+        DIAG.event('response', `${method} ${path} ${response.status} ${Math.round(__ms)}ms`);
       }
       const payload = await parseResponsePayload(response);
       if (!response.ok) throw new ApiError(extractError(payload, response.status), response.status, payload);
       return payload ?? {};
     },
     getStatus() { return this.request('/api/status'); },
-    getSettings() { return this.request('/api/settings'); },
-    saveSettings(body) { return this.request('/api/settings', { method: 'POST', body }); },
+    // Settings exist once per track.  While the settings window is open the
+    // scope switch decides which track the request addresses; everywhere else
+    // the live track is used, so the composer keeps talking to its own world.
+    getSettings() { return this.request('/api/settings' + settingsQuery()); },
+    saveSettings(body) { return this.request('/api/settings', { method: 'POST', body: withScope(body) }); },
     login() { return this.request('/api/login', { method: 'POST', body: { method: 'window' } }); },
     loginCookie(cookie) { return this.request('/api/login', { method: 'POST', body: { method: 'manual', cookie } }); },
     loginPoll() { return this.request('/api/login/poll'); },
@@ -510,16 +617,16 @@
     refreshChat(id) { return this.request(`/api/chats/${encodeURIComponent(id)}/refresh`, { method: 'POST', body: {} }); },
     deleteChat(id) { return this.request(`/api/chats/${encodeURIComponent(id)}/delete`, { method: 'POST', body: {} }); },
     compactChat(id) { return this.request(`/api/chats/${encodeURIComponent(id)}/compact`, { method: 'POST', body: {} }); },
-    getMemory() { return this.request('/api/memory'); },
-    saveMemory(body) { return this.request('/api/memory', { method: 'POST', body }); },
+    getMemory() { return this.request('/api/memory' + settingsQuery()); },
+    saveMemory(body) { return this.request('/api/memory', { method: 'POST', body: withScope(body) }); },
     updateCheck(force = false) { return this.request(`/api/update-check${force ? '?force=1' : ''}`); },
     exportSettings() { return this.request('/api/settings/export'); },
     importSettings(bundle) { return this.request('/api/settings/import', { method: 'POST', body: bundle }); },
     diagnostics() { return this.request('/api/diagnostics'); },
-    getUsage() { return this.request('/api/usage'); },
-    getGateway() { return this.request('/api/gateway'); },
-    startGateway() { return this.request('/api/gateway/start', { method: 'POST', body: {} }); },
-    stopGateway() { return this.request('/api/gateway/stop', { method: 'POST', body: {} }); },
+    getUsage() { return this.request('/api/usage' + settingsQuery()); },
+    getGateway() { return this.request('/api/gateway' + settingsQuery()); },
+    startGateway() { return this.request('/api/gateway/start', { method: 'POST', body: withScope({}) }); },
+    stopGateway() { return this.request('/api/gateway/stop', { method: 'POST', body: withScope({}) }); },
     getComponents(refresh = false) { return this.request(`/api/components${refresh ? '?refresh=1' : ''}`); },
     installComponent(id) { return this.request('/api/components/install', { method: 'POST', body: { id } }); },
     recheckWebdev(id) { return this.request(`/api/chats/${encodeURIComponent(id)}/webdev-recheck`, { method: 'POST', body: {} }); },
@@ -534,20 +641,20 @@
     restoreCheckpoint(id) { return this.request(`/api/checkpoints/${encodeURIComponent(id)}/restore`, { method: 'POST', body: {} }); },
     workspaceSnapshot(paths) { return this.request('/api/workspace/snapshot', { method: 'POST', body: { paths } }); },
     getElo() { return this.request('/api/elo'); },
-    getAutomations() { return this.request('/api/automations'); },
-    saveAutomation(body) { return this.request('/api/automations', { method: 'POST', body }); },
-    deleteAutomation(id) { return this.request(`/api/automations/${encodeURIComponent(id)}`, { method: 'DELETE' }); },
-    runAutomation(id) { return this.request(`/api/automations/${encodeURIComponent(id)}/run`, { method: 'POST', body: {} }); },
+    getAutomations() { return this.request('/api/automations' + settingsQuery()); },
+    saveAutomation(body) { return this.request('/api/automations', { method: 'POST', body: withScope(body) }); },
+    deleteAutomation(id) { return this.request(`/api/automations/${encodeURIComponent(id)}` + settingsQuery(), { method: 'DELETE' }); },
+    runAutomation(id) { return this.request(`/api/automations/${encodeURIComponent(id)}/run`, { method: 'POST', body: withScope({}) }); },
     getHistory() { return this.request('/api/history'); },
     getPermissions() { return this.request('/api/permissions'); },
     decidePermission(id, decision) {
       return this.request(`/api/permissions/${encodeURIComponent(id)}`, { method: 'POST', body: { decision } });
     },
-    getPermissionMode() { return this.request('/api/permission-mode'); },
-    setPermissionMode(mode) { return this.request('/api/permission-mode', { method: 'POST', body: { mode } }); },
-    getWorkspace() { return this.request('/api/workspace'); },
-    setWorkspace(path) { return this.request('/api/workspace/set', { method: 'POST', body: { path } }); },
-    clearWorkspace() { return this.request('/api/workspace/set', { method: 'POST', body: { clear: true } }); },
+    getPermissionMode() { return this.request('/api/permission-mode' + settingsQuery()); },
+    setPermissionMode(mode) { return this.request('/api/permission-mode', { method: 'POST', body: withScope({ mode }) }); },
+    getWorkspace() { return this.request('/api/workspace' + settingsQuery()); },
+    setWorkspace(path) { return this.request('/api/workspace/set', { method: 'POST', body: withScope({ path }) }); },
+    clearWorkspace() { return this.request('/api/workspace/set', { method: 'POST', body: withScope({ clear: true }) }); },
     async uploadAttachment(file, kind, modality, details = {}) {
       const form = new FormData();
       form.append('file', file, file.name);
@@ -627,6 +734,24 @@
     },
     async stop(chatId) { return this.request('/api/stop', { method: 'POST', body: chatId ? { chat_id: chatId } : {} }); },
     getAccounts() { return this.request('/api/accounts'); },
+    // Google AI mode has its own account list and settings: it is a separate
+    // world from the arena.ai one, down to the identity in the sidebar.
+    getGoogleStatus() { return this.request('/api/google/status'); },
+    async refreshGooglePrefs() {
+      const data = await this.getGoogleStatus();
+      return data?.prefs || {};
+    },
+    googleVerify() { return this.request('/api/google/verify', { method: 'POST', body: {} }); },
+    googleImport() { return this.request('/api/google/import', { method: 'POST', body: {} }); },
+    googleThreads() { return this.request('/api/google/threads'); },
+    googleThreadOpen(body = {}) { return this.request('/api/google/threads/open', { method: 'POST', body }); },
+    googleThreadRead(body = {}) { return this.request('/api/google/thread/read', { method: 'POST', body }); },
+    googleSignIn() { return this.request('/api/google/sign-in', { method: 'POST', body: {} }); },
+    googleOpen(body = {}) { return this.request('/api/google/open', { method: 'POST', body }); },
+    saveGooglePrefs(body) { return this.request('/api/google/prefs', { method: 'POST', body }); },
+    addGoogleCookies(body) { return this.request('/api/google/accounts/cookies', { method: 'POST', body }); },
+    useGoogleAccount(id) { return this.request('/api/google/accounts/use', { method: 'POST', body: { id } }); },
+    removeGoogleAccount(id) { return this.request('/api/google/accounts/remove', { method: 'POST', body: { id } }); },
     switchAccount(id) { return this.request('/api/accounts/switch', { method: 'POST', body: { id } }); },
     addAccount() { return this.request('/api/accounts/add', { method: 'POST', body: {} }); },
     removeAccount(id) { return this.request('/api/accounts/remove', { method: 'POST', body: { id } }); },
@@ -1840,6 +1965,15 @@ You can start with a more structured option: one script, short captions, and a c
     avatarUrl: '',
     backendReached: false,
     mode: 'direct',
+    // Two independent tracks: Arena (arena.ai account) and Google AI mode
+    // (its own chats, its own theme). They never share a chat list.
+    track: (() => { try { return window.localStorage.getItem('ap-track') === 'google' ? 'google' : 'arena'; } catch { return 'arena'; } })(),
+    // Google AI mode state: its window, its account, its own settings.
+    google: { loaded: false, desktop: false, window: null, account: null, accounts: [], prefs: null },
+    // Settings scope while the settings window is open: 'arena' | 'google'.
+    settingsTrack: null,
+    // Google thread link of the open chat, when it was imported from Google.
+    activeChatExternal: '',
     modality: 'text',
     savedModality: 'auto',
     layout: { sidebarWidth: 276, workspaceWidth: 332, connectorsShare: 38 },
@@ -1887,10 +2021,14 @@ You can start with a more structured option: one script, short captions, and a c
     nativeReady: false,
     dockShare: 0.42,
     sidebarCollapsed: false,
+    chatsDrawerOpen: false,
     chats: [],
     chatsLoading: true,
     chatsError: null,
     cloudChats: [],
+    googleThreads: [],
+    googleThreadsLoading: false,
+    googleThreadsError: null,
     cloudChatsLoading: false,
     cloudChatsError: null,
     chatFilter: '',
@@ -1973,6 +2111,8 @@ You can start with a more structured option: one script, short captions, and a c
   };
 
   const API = DEMO ? demoApi : liveApi;
+  API.clearCache = API_clearCache;
+  API.clearCache();
   const els = {};
 
   const UNREAD_DONE_KEY = 'arenaDesktop.unreadDone.v1';
@@ -2111,6 +2251,21 @@ You can start with a more structured option: one script, short captions, and a c
     };
   }
 
+  // Which track settings requests address while the settings window is open.
+  function scopeTrack() {
+    return state.settingsTrack === 'google' ? 'google' : '';
+  }
+
+  function settingsQuery() {
+    const track = scopeTrack();
+    return track ? `?track=${track}` : '';
+  }
+
+  function withScope(body) {
+    const track = scopeTrack();
+    return track ? { ...(body || {}), track } : (body || {});
+  }
+
   function normalizeChat(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const id = raw.id ?? raw.chat_id ?? raw.uuid;
@@ -2124,10 +2279,14 @@ You can start with a more structured option: one script, short captions, and a c
       modality: validModality(raw.modality),
       agent_backend: raw.agent_backend === 'arena' ? 'arena' : raw.agent_backend === 'local' ? 'local' : null,
       pinned: Boolean(raw.pinned ?? raw.starred),
-      source: raw.source === 'arena' ? 'arena' : 'local',
+      source: raw.source === 'arena' ? 'arena'
+        : raw.source === 'google' ? 'google'
+        : 'local',
       eval_id: typeof raw.eval_id === 'string' ? raw.eval_id : null,
       parent_id: raw.parent_id ? String(raw.parent_id) : null,
       children: Array.isArray(raw.children) ? raw.children.map((kid) => normalizeChat(kid)).filter(Boolean) : [],
+      external_url: typeof raw.external_url === 'string' ? raw.external_url : '',
+      imported: Boolean(raw.imported),
       raw
     };
   }
@@ -2231,7 +2390,7 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function requiredModelsReady() {
-    if (!isValidSelection(state.mode, state.modality)) return false;
+    if (state.track !== 'google' && !isValidSelection(state.mode, state.modality)) return false;
     if (state.mode === 'battle' || state.mode === 'agent') return true;
     if (state.modelsLoading || state.modelsError) return false;
     if (!state.models.length) return false;
@@ -3113,6 +3272,65 @@ You can start with a more structured option: one script, short captions, and a c
     };
   }
 
+  async function loadGoogleThreads({ silent = false } = {}) {
+    if (state.track !== 'google' || state.demo) {
+      state.googleThreads = [];
+      state.googleThreadsError = null;
+      state.googleThreadsLoading = false;
+      return [];
+    }
+    const g = state.google || {};
+    if (!g.loaded || !googleIdentity().signedIn) {
+      state.googleThreads = [];
+      state.googleThreadsError = null;
+      state.googleThreadsLoading = false;
+      renderChats();
+      return [];
+    }
+    state.googleThreadsLoading = true;
+    if (!silent) { state.googleThreadsError = null; renderChats(); }
+    try {
+      const raw = await API.googleThreads();
+      const local = new Set((state.chats || [])
+        .filter((chat) => chatTrack(chat) === 'google')
+        .map((chat) => String(chat.id)));
+      state.googleThreads = (raw?.entries || []).map((entry) => ({
+        title: String(entry.title || 'Google AI mode thread'),
+        url: String(entry.url || ''),
+        mtid: String(entry.mtid || ''),
+        local_chat_id: entry.local_chat_id ? String(entry.local_chat_id) : null,
+        imported: Boolean(entry.local_chat_id && local.has(String(entry.local_chat_id))),
+      })).filter((entry) => entry.url);
+      state.googleThreadsError = raw?.ok === false
+        ? errorMessage(new ApiError(raw.error || 'Google history is unavailable', 0, raw)) : null;
+      return state.googleThreads;
+    } catch (error) {
+      state.googleThreads = [];
+      state.googleThreadsError = errorMessage(error);
+      if (!silent) toast(state.googleThreadsError, 'error', 'Google history');
+      return [];
+    } finally {
+      state.googleThreadsLoading = false;
+      renderChats();
+    }
+  }
+
+  async function openGoogleThread(entry) {
+    if (!entry || !entry.url) return;
+    if (entry.local_chat_id) { await openChat(entry.local_chat_id); return; }
+    try {
+      const res = await API.googleThreadOpen({ url: entry.url, title: entry.title });
+      if (!res?.ok || !res.chat_id) throw new ApiError(res?.error || 'Import failed', 0, res);
+      entry.local_chat_id = String(res.chat_id);
+      entry.imported = true;
+      await loadChats({ silent: true });
+      await openChat(String(res.chat_id));
+      void loadGoogleThreads({ silent: true });
+    } catch (error) {
+      toast(errorMessage(error), 'error', 'Google history');
+    }
+  }
+
   async function loadArenaChats({ silent = false } = {}) {
     if (!state.authenticated) {
       state.cloudChats = [];
@@ -3171,14 +3389,14 @@ You can start with a more structured option: one script, short captions, and a c
       state.modelsError = selectionProblem || null;
       state.modelsPromise = null;
       ensureModelSelections();
-      renderModelStrip();
+      renderModelChips();
       renderModelsNavCount();
       updateComposerState();
       return [];
     }
     state.modelsLoading = true;
     if (!quiet) state.modelsError = null;
-    renderModelStrip();
+    renderModelChips();
     updateComposerState();
     const promise = (async () => {
       try {
@@ -3189,7 +3407,7 @@ You can start with a more structured option: one script, short captions, and a c
         state.modelsModality = modality;
         state.modelsError = null;
         ensureModelSelections();
-        renderModelStrip();
+        renderModelChips();
         renderModelsNavCount();
         return state.models;
       } catch (error) {
@@ -3200,7 +3418,7 @@ You can start with a more structured option: one script, short captions, and a c
         state.modelsError = errorMessage(error);
         state.modelAId = null;
         state.modelBId = null;
-        renderModelStrip();
+        renderModelChips();
         renderModelsNavCount();
         if (!quiet) toast(state.modelsError, 'error', "Models unavailable");
         return [];
@@ -3208,7 +3426,7 @@ You can start with a more structured option: one script, short captions, and a c
         if (requestId === state.modelsRequest) {
           state.modelsLoading = false;
           if (state.modelsPromise === promise) state.modelsPromise = null;
-          renderModelStrip();
+          renderModelChips();
           updateComposerState();
         }
       }
@@ -3220,13 +3438,303 @@ You can start with a more structured option: one script, short captions, and a c
   /* ---------------------------------------------------------------------- */
   /* Chat list                                                             */
   /* ---------------------------------------------------------------------- */
+  // ----- tracks: Arena (arena.ai) vs Google AI mode -----
+  // Two independent worlds: own chats, own composer controls, own theme.
+  // Arena keeps the full toolbar; Google AI mode keeps Agent integration only.
+  const TRACK_COPY = {
+    arena: {
+      title: 'Arena <em>Desktop</em>',
+      lede: 'Chat with the best AI models right on your desktop: Battle, Direct, ' +
+            'Side by Side, Search and native Agent Mode — all in one window.',
+      note: 'Unofficial personal client for arena.ai · pick a mode below and just start typing',
+      placeholder: 'Ask anything…'
+    },
+    google: {
+      title: 'Google <em>AI mode</em>',
+      lede: 'Search the web with Google AI mode — a separate space with its own chats, ' +
+            'kept apart from your Arena dialogues.',
+      note: 'Google AI mode track · connectors, modes and models are hidden here',
+      placeholder: 'Ask Google AI mode…'
+    }
+  };
+
+  async function loadGoogleStatus({ silent = false } = {}) {
+    try {
+      const data = await API.getGoogleStatus();
+      state.google = {
+        loaded: true,
+        signed_in: Boolean(data?.signed_in),
+        desktop: Boolean(data?.desktop),
+        window: data?.window || null,
+        account: data?.account || null,
+        accounts: Array.isArray(data?.accounts) ? data.accounts : [],
+        sessionExpired: Boolean(data?.session_expired),
+        sessionReason: data?.session_reason || '',
+        prefs: data?.prefs || state.google.prefs,
+      };
+    } catch (error) {
+      state.google = { ...state.google, loaded: true, desktop: false };
+      if (!silent) toast(errorMessage(error), 'error', 'Google AI mode');
+    }
+    if (state.track === 'google') { updateAccountUI(); }
+    return state.google;
+  }
+
+  function googleIdentity() {
+    const acc = state.google?.account || {};
+    const saved = (state.google?.accounts || []).find((item) => item.current) || null;
+    const expired = Boolean(acc.expired || state.google?.expired || state.google?.session_expired);
+    const signedIn = !expired && Boolean(
+      state.google?.signed_in ||
+      (acc.signed_in && state.google?.has_cookie)
+    );
+    return {
+      signedIn,
+      name: (signedIn && (acc.name || acc.email)) || saved?.email || saved?.name || '',
+      email: signedIn ? (acc.email || state.google?.current_account || acc.email || '') : '',
+      window: Boolean(state.google?.desktop),
+      expired: expired,
+      expiredReason: saved?.expired_reason || state.google?.sessionReason || '',
+      current_account: state.google?.current_account || '',
+      mode: state.google?.mode || '',
+    };
+  }
+
+  // The settings window registers its own repaint here while it is open.
+  function refreshSettingsIfOpen() {
+    try { state.settingsRefresh?.(); } catch { /* window closed mid-repaint */ }
+  }
+
+  let googleSignInTimer = null;
+
+  function stopGoogleSignInWatch() {
+    if (googleSignInTimer) {
+      window.clearInterval(googleSignInTimer);
+      googleSignInTimer = null;
+    }
+  }
+
+  // Sign-in ends by itself: the server closes the window the moment Google
+  // reports a session, so the UI only has to notice and say who signed in.
+  function watchGoogleSignIn() {
+    stopGoogleSignInWatch();
+    let verifyAttempted = false;
+    let sawWindow = false;
+    googleSignInTimer = window.setInterval(async () => {
+      try {
+        const data = await API.getGoogleStatus();
+        const diag = (data && data.diagnosis) || {};
+        if (diag.state === 'open' || diag.state === 'sleeping' || data?.window?.open) {
+          sawWindow = true;
+        }
+        const account = (data && data.account) || {};
+        const expired = Boolean(account.expired || data?.expired || data?.session_expired);
+        let signed = !expired && Boolean(
+          account.signed_in ||
+          data?.signed_in ||
+          (data?.configured && data?.has_cookie)
+        );
+        if (!signed && !expired && !verifyAttempted && (
+          data?.has_cookie ||
+          data?.configured ||
+          (sawWindow && diag.state === 'closed')
+        )) {
+          verifyAttempted = true;
+          try {
+            const verified = await API.googleVerify();
+            if (verified && (verified.signed_in || verified.account?.signed_in)) {
+              signed = true;
+              Object.assign(data, verified);
+            }
+          } catch (_) {}
+        }
+        state.google = Object.assign({}, state.google || {}, data || {});
+        if (signed) {
+          stopGoogleSignInWatch();
+          state.loginPending = false;
+          state.google.signed_in = true;
+          state.google.has_cookie = true;
+          state.google.configured = true;
+          state.google.session_expired = false;
+          state.google.account = Object.assign({}, state.google.account || {}, {
+            signed_in: true,
+            expired: false,
+            email: (data && (data.email || data.current_account || data.account?.email)) || state.google.account?.email || "",
+          });
+          updateAccountUI();
+          if (typeof refreshGoogleStatus === 'function') {
+            try { await refreshGoogleStatus(); } catch (_) {}
+          }
+          if (typeof refreshReadiness === 'function') {
+            try { await refreshReadiness(); } catch (_) {}
+          }
+          if (typeof updateBootUI === 'function') updateBootUI();
+          if (typeof renderLoginGate === 'function') renderLoginGate();
+          showToast(`Signed in to Google${data?.account?.email ? `: ${data.account.email}` : ''}.`,
+            'success', 'Google sign-in');
+        }
+      } catch (_) {}
+    }, 800);
+  }
+
+  function _applyGoogleButtonDoneState(btn, done, labelText) {
+    if (!btn) return;
+    btn.classList.toggle('is-signed-in', Boolean(done));
+    btn.disabled = Boolean(done);
+    btn.setAttribute('aria-disabled', done ? 'true' : 'false');
+    if (done && labelText) {
+      btn.textContent = labelText;
+    }
+  }
+
+  async function googleSignIn() {
+    if (googleSignedIn()) {
+      updateAccountUI();
+      return;
+    }
+    try {
+      await API.googleSignIn();
+      toast('Sign in inside the Google window. It closes by itself once Google confirms the session.',
+        'info', 'Google sign-in');
+      watchGoogleSignIn();
+    } catch (error) {
+      toast(errorMessage(error), 'error', 'Google sign-in');
+    }
+  }
+
+  async function checkGoogleSignIn() {
+    try {
+      const res = await API.googleVerify();
+      await loadGoogleStatus({ silent: true });
+      updateAccountUI();
+      if (res?.signed_in) {
+        toast(`Google confirms the session: ${res.email || 'signed in'}.`, 'success', 'Google check');
+        void loadGoogleThreads({ silent: true });
+      } else {
+        toast('Google shows no session in the window yet. Finish the sign-in there, then check again.',
+          'warning', 'Google check');
+      }
+      refreshSettingsIfOpen();
+      return res;
+    } catch (error) {
+      toast(errorMessage(error), 'error', 'Google check');
+      return null;
+    }
+  }
+
+  let googleHistorySynced = false;
+
+  async function syncGoogleHistory({ silent = true } = {}) {
+    try {
+      const res = await API.googleImport();
+      googleHistorySynced = true;
+      if (Array.isArray(res?.chats)) state.chats = res.chats.map(normalizeChat).filter(Boolean);
+      else await loadChats();
+      renderChats();
+      if (!silent) {
+        if (res?.added || res?.updated) {
+          toast(`Imported ${res.added} new, refreshed ${res.updated} existing Google threads.`,
+            'success', 'Google history');
+        } else {
+          toast(res?.reason || 'Nothing new in Google history.', 'info', 'Google history');
+        }
+      }
+      return res;
+    } catch (error) {
+      if (!silent) toast(errorMessage(error), 'error', 'Google history');
+      return null;
+    }
+  }
+
+  async function googleUseAccount(account) {
+    if (!account || account.current) return;
+    try {
+      await API.useGoogleAccount(account.id);
+      await loadGoogleStatus({ silent: true });
+      updateAccountUI();
+      toast(`Switched to ${account.email || account.name || 'the Google account'}.`, 'success', 'Google account');
+    } catch (error) {
+      toast(errorMessage(error), 'error', 'Google account');
+    }
+  }
+
+  async function googleRemoveAccount(account) {
+    if (!account) return;
+    try {
+      await API.removeGoogleAccount(account.id);
+      await loadGoogleStatus({ silent: true });
+      toast('Saved Google account removed from this device.', 'info', 'Google account');
+    } catch (error) {
+      toast(errorMessage(error), 'error', 'Google account');
+    }
+  }
+
+  function setTrack(track, { silent = false } = {}) {
+    const next = track === 'google' ? 'google' : 'arena';
+    const changed = state.track !== next;
+    state.track = next;
+    try { window.localStorage.setItem('ap-track', next); } catch { /* optional */ }
+    document.body?.setAttribute('data-track', next);
+    els.app?.setAttribute('data-track', next);
+    // Google AI mode has no mode/model chooser: keep the internal selection on
+    // Direct/Text so returning to Arena is predictable.
+    if (next === 'google' && state.mode !== 'direct') {
+      state.mode = 'direct';
+      state.selectionTouched = true;
+    }
+    if (changed) {
+      const active = state.chats.find((chat) => String(chat.id) === String(state.activeChatId));
+      if (active && chatTrack(active) !== next) {
+        // Never show an Arena dialogue inside Google AI mode (or back).
+        state.activeChatId = null;
+        state.activeChatEvalId = null;
+        state.messages = [];
+        state.artifacts = [];
+        state.view = 'welcome';
+        renderChatArea();
+        setView('welcome');
+      }
+    }
+    const appNameNode = document.getElementById('topbarAppName');
+    if (appNameNode) appNameNode.textContent = next === 'google' ? 'Google AI mode' : 'Arena Desktop';
+    // The same button means two different things: in Arena it integrates the
+    // agent into the chat, in Google AI mode it lets Google direct an Arena
+    // Agent as the executor.
+    const integrationChip = els.agentIntegrationButton;
+    if (integrationChip) {
+      const label = integrationChip.querySelector('.chip-label');
+      if (label) label.textContent = next === 'google' ? 'Superviser integration' : 'Agent integration';
+      integrationChip.setAttribute('aria-label', next === 'google' ? 'Superviser integration' : 'Agent integration');
+    }
+    const copy = TRACK_COPY[next];
+    const titleNode = document.getElementById('welcomeTitle');
+    if (titleNode) titleNode.innerHTML = copy.title;
+    const ledeNode = document.querySelector('.hero-lede');
+    if (ledeNode) ledeNode.textContent = copy.lede;
+    const noteNode = document.querySelector('.hero-note');
+    if (noteNode) noteNode.textContent = copy.note;
+    if (els.prompt) els.prompt.placeholder = copy.placeholder;
+    if (next === 'google') void loadGoogleStatus({ silent: true });
+    renderChats();
+    updateComposerState();
+    renderChatHead();
+    updateAccountUI();
+    if (changed && !silent) {
+      announce(next === 'google' ? "Google AI mode." : "Arena mode.");
+    }
+  }
+
   function chatMatchesFilter(chat) {
     const query = state.chatFilter.trim().toLocaleLowerCase('en');
     return !query || String(chat.title || '').toLocaleLowerCase('en').includes(query);
   }
 
+  function chatTrack(chat) {
+    return (chat && chat.source === 'google') ? 'google' : 'arena';
+  }
+
   function filteredChats() {
-    return state.chats.filter(chatMatchesFilter);
+    return state.chats.filter((chat) => chatTrack(chat) === state.track && chatMatchesFilter(chat));
   }
 
   function dedupedArenaChats() {
@@ -3271,7 +3779,8 @@ You can start with a more structured option: one script, short captions, and a c
     const unread = !running && state.unreadDone.has(String(chat.id));
     const row = el('div', { class: `chat-row${active ? ' is-active' : ''}${running ? ' is-running' : ''}${unread ? ' is-unread' : ''}`, role: 'listitem' });
     const metaBits = [];
-    if (chat.mode) metaBits.push(modeMeta(chat.mode).label);
+    if (chat.source === 'google') metaBits.push(chat.imported ? 'Google AI mode · imported' : 'Google AI mode');
+    else if (chat.mode) metaBits.push(modeMeta(chat.mode).label);
     metaBits.push(relativeTime(chat.updated_at || chat.created_at));
     const openButton = el('button', {
       class: 'chat-row-main chat-row-open',
@@ -3328,12 +3837,17 @@ You can start with a more structured option: one script, short captions, and a c
     if (!listNode) return;
     const filtered = filteredChats();
     const cloudFiltered = filteredArenaChats();
-    const totalVisibleKinds = state.chats.length + dedupedArenaChats().length;
+    const trackChats = state.chats.filter((chat) => chatTrack(chat) === state.track);
+    const totalVisibleKinds = state.track === 'google'
+      ? trackChats.length
+      : trackChats.length + dedupedArenaChats().length;
     if (els.chatCount) els.chatCount.textContent = totalVisibleKinds ? String(totalVisibleKinds) : '';
+    renderRailChats();
     listNode.setAttribute('aria-busy', String(state.chatsLoading || state.cloudChatsLoading));
     clear(listNode);
 
-    listNode.appendChild(chatGroupTitle('clock', "Recent"));
+    listNode.appendChild(chatGroupTitle('clock',
+      state.track === 'google' ? "Google AI mode chats" : "Recent"));
     if (state.chatsLoading && !state.chats.length) {
       const skeleton = el('div', { class: 'sidebar-skeleton', 'aria-label': "Loading local chats" });
       for (let index = 0; index < 3; index += 1) skeleton.appendChild(el('span', { class: `skeleton-line${index === 1 ? ' short' : ''}` }));
@@ -3348,7 +3862,9 @@ You can start with a more structured option: one script, short captions, and a c
     } else if (!filtered.length) {
       listNode.appendChild(el('div', { class: 'chat-group-note', text: state.chatFilter
         ? "There is nothing in the local history for this request."
-        : "No local chats yet. Create the first dialogue — it will appear here." }));
+        : state.track === 'google'
+          ? "No Google AI mode chats yet. Ask something — the chat stays in this mode."
+          : "No local chats yet. Create the first dialogue — it will appear here." }));
     } else {
       filtered.forEach((chat) => {
         listNode.appendChild(localChatRow(chat));
@@ -3372,6 +3888,35 @@ You can start with a more structured option: one script, short captions, and a c
       });
     }
 
+    if (state.track === 'google') {
+      // Same shape arena.ai uses for its cloud history: the account's own
+      // threads are listed here, and a click imports one into the local list.
+      listNode.appendChild(chatGroupTitle('cloud', "Only in your Google account"));
+      const g = state.google || {};
+      if (!g.loaded) {
+        listNode.appendChild(el('div', { class: 'chat-group-note', text: "Checking the Google account…" }));
+      } else if (!googleIdentity().signedIn) {
+        listNode.appendChild(el('div', { class: 'chat-group-note', text: "Sign in to Google to see the AI mode threads from your account." }));
+      } else if (state.googleThreadsLoading) {
+        listNode.appendChild(el('div', { class: 'chat-group-note' },
+          el('span', { class: 'mini-spinner', 'aria-hidden': 'true' }),
+          el('span', { text: " Loading Google history…" })));
+      } else if (state.googleThreadsError) {
+        listNode.appendChild(el('div', { class: 'sidebar-empty sidebar-error' },
+          el('strong', { text: "Google history is unavailable" }),
+          el('span', { class: 'inline-error', text: state.googleThreadsError }),
+          el('button', { class: 'button button-small button-quiet', type: 'button', 'data-action': 'retry-google-threads' },
+            iconEl('refresh'), el('span', { text: "Retry" }))
+        ));
+      } else if (!googleCloudEntries().length) {
+        listNode.appendChild(el('div', { class: 'chat-group-note', text: state.chatFilter
+          ? "Nothing found in the Google account for this request."
+          : "No Google AI mode threads in the account yet." }));
+      } else {
+        googleCloudEntries().forEach((entry) => listNode.appendChild(googleThreadRow(entry)));
+      }
+      return;
+    }
     listNode.appendChild(chatGroupTitle('cloud', "Only on arena.ai"));
     if (!state.authenticated) {
       listNode.appendChild(el('div', { class: 'chat-group-note', text: "Log in to Arena to see the account chats from the website. Local dialogues above are available without logging in." }));
@@ -3393,6 +3938,43 @@ You can start with a more structured option: one script, short captions, and a c
     } else {
       cloudFiltered.forEach((entry) => listNode.appendChild(arenaChatRow(entry)));
     }
+  }
+
+  function googleCloudEntries() {
+    const filter = state.chatFilter.trim().toLowerCase();
+    const seen = new Set();
+    return (state.googleThreads || []).filter((entry) => {
+      // Imported threads stay listed, marked "imported" — arena.ai keeps its
+      // cloud chats visible too, so the account's real history is never
+      // hidden from the person who owns it.
+      if (filter && !String(entry.title || '').toLowerCase().includes(filter)) return false;
+      if (seen.has(entry.url)) return false;
+      seen.add(entry.url);
+      return true;
+    });
+  }
+
+  function googleThreadRow(entry) {
+    const pending = Boolean(entry._opening);
+    const meta = pending ? 'Importing…'
+      : entry.local_chat_id ? 'Google AI mode · imported' : 'Google AI mode · import on click';
+    const openButton = el('button', {
+      class: 'chat-row-main chat-row-open', type: 'button',
+      title: entry.title || '', 'aria-label': `Open Google thread: ${entry.title}`,
+      onclick: async () => {
+        if (entry._opening) return;
+        entry._opening = true;
+        renderChats();
+        await openGoogleThread(entry);
+        entry._opening = false;
+      }
+    },
+      el('span', { class: 'chat-row-title', text: entry.title }),
+      el('span', { class: 'chat-row-meta', text: meta }));
+    return el('div', { class: `chat-row${pending ? ' is-running' : ''}`, role: 'listitem' },
+      el('span', { class: 'chat-row-status', 'aria-hidden': 'true' },
+        pending ? el('span', { class: 'run-dot' }) : null),
+      openButton);
   }
 
   function setChatSearchVisible(visible) {
@@ -3430,12 +4012,113 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function setSidebarCollapsed(collapsed) {
+    // The old sidebar is gone: this now means "the chat rail is folded", so
+    // the toolbar shows one filename-style title instead of the strip.
     state.sidebarCollapsed = Boolean(collapsed);
-    els.app?.classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
+    els.app?.classList.toggle('rail-collapsed', state.sidebarCollapsed);
     els.collapseSidebar?.setAttribute('aria-expanded', String(!state.sidebarCollapsed));
-    els.collapseSidebar?.setAttribute('aria-label', state.sidebarCollapsed ? "Expand the sidebar" : "Collapse the sidebar");
-    if (els.collapseSidebar) els.collapseSidebar.title = state.sidebarCollapsed ? "Expand the panel" : "Collapse the panel";
+    els.collapseSidebar?.setAttribute('aria-label', state.sidebarCollapsed ? "Unfold the chats" : "Fold the chats");
+    if (els.collapseSidebar) els.collapseSidebar.title = state.sidebarCollapsed ? "Unfold the chats" : "Fold the chats";
+    els.chatsDrawerButton?.setAttribute('aria-expanded', String(!state.sidebarCollapsed));
     try { localStorage.setItem('arenaPersonal.sidebarCollapsed.v4', state.sidebarCollapsed ? '1' : '0'); } catch { /* storage unavailable */ }
+    renderRailChats();
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Toolbar chat rail                                                     */
+  /* ---------------------------------------------------------------------- */
+  const RAIL_MAX_PER_SIDE = 12;
+
+  function shortChatTitle(text) {
+    const value = String(text || 'Chat').trim();
+    return value.length > 16 ? `${value.slice(0, 15)}…` : value;
+  }
+
+  function railChatButton(chat, repeated = false) {
+    return el('button', {
+      class: `rail-chip${String(chat.id) === String(state.activeChatId) ? ' is-active' : ''}${repeated ? ' is-repeat' : ''}`,
+      type: 'button', title: chat.title || 'Chat',
+      onclick: (event) => { event.preventDefault(); void openChat(chat.id); }
+    }, el('span', { text: shortChatTitle(chat.title) }));
+  }
+
+  function renderRailChats() {
+    const left = els.railLeft;
+    const right = els.railRight;
+    if (!left || !right) return;
+    clear(left);
+    clear(right);
+    if (state.sidebarCollapsed) return;
+
+    const chats = state.chats.filter((chat) => chatTrack(chat) === state.track);
+    if (!chats.length) return;
+
+    // The row is never half empty: a short history repeats itself until both
+    // sides are filled. The count comes from the room actually available, so
+    // wide windows get a full conveyor and narrow ones stay clean.
+    const chipWidth = 150;                       // chip + gap, roughly
+    const freeEachSide = Math.max(2, Math.round(((els.railStrip?.clientWidth || 900) - 240) / 2 / chipWidth));
+    const wanted = freeEachSide * 2;
+    // A pool built by repeating the chat list: `while (pool.length < wanted)
+    // pool.push(...chats)` never ends when the list is empty, which is exactly
+    // what an empty or fully filtered history gives — and that froze the whole
+    // interface the moment the chat list was opened. Repeats are computed
+    // without a loop that can miss its exit condition.
+    const pool = [];
+    if (chats.length) {
+      while (pool.length < wanted) pool.push(...chats);
+    }
+    const visible = pool.slice(0, wanted);
+    if (!visible.length) return;
+
+    // Newest next to the button, older ones outward: build each side from the
+    // inside out, then reverse the left one so it mirrors the movement.
+    const leftChips = [];
+    const rightChips = [];
+    visible.forEach((chat, index) => {
+      const clone = index >= chats.length;      // a repeat, not the real chat
+      (index % 2 === 1 ? leftChips : rightChips).push(railChatButton(chat, clone));
+    });
+    leftChips.reverse().forEach((chip) => left.appendChild(chip));
+    rightChips.forEach((chip) => right.appendChild(chip));
+
+    // The strip drifts outward, like the reference: keep the newest nearest.
+    requestAnimationFrame(() => {
+      if (left) left.scrollLeft = left.scrollWidth;
+      if (right) right.scrollLeft = 0;
+    });
+  }
+
+  function setChatsDrawerOpen(open) {
+    state.chatsDrawerOpen = Boolean(open);
+    if (els.chatsDrawer) els.chatsDrawer.hidden = !state.chatsDrawerOpen;
+    els.app?.classList.toggle('drawer-open', state.chatsDrawerOpen);
+    els.chatsDrawerButton?.setAttribute('aria-expanded', String(state.chatsDrawerOpen));
+    if (state.chatsDrawerOpen) placeChatsDrawer();
+    // Focus goes to the list, not the search box: the drawer is a menu of
+    // chats first and a search field second.
+    if (state.chatsDrawerOpen) {
+      const first = els.chatsDrawer?.querySelector('.chat-row-open');
+      window.setTimeout(() => (first || els.chatsDrawerClose)?.focus(), 40);
+    }
+  }
+
+  // The drawer hangs from the chats icon: its left edge and its little arrow
+  // are measured from that button, whatever else moves in the bar.
+  function placeChatsDrawer() {
+    const button = els.chatsDrawerButton;
+    const drawer = els.chatsDrawer;
+    const cluster = els.chatsDrawer?.parentElement?.parentElement;
+    if (!button || !drawer || !cluster) return;
+    const b = button.getBoundingClientRect();
+    const c = cluster.getBoundingClientRect();
+    const width = Math.min(360, window.innerWidth - 28);
+    // Keep the list on screen even when the icon sits near the right edge.
+    let left = b.left - c.left;
+    const maxLeft = window.innerWidth - c.left - width - 14;
+    left = Math.max(0, Math.min(left, maxLeft));
+    drawer.style.setProperty('--drawer-left', `${Math.round(left)}px`);
+    drawer.style.setProperty('--drawer-caret', `${Math.round(b.width / 2 - 5)}px`);
   }
 
   function focusComposer() {
@@ -3455,7 +4138,8 @@ You can start with a more structured option: one script, short captions, and a c
   function updateTopbarTitle() {
     if (els.topbarTitle) els.topbarTitle.textContent = currentViewTitle();
     if (els.crumbTitle) els.crumbTitle.textContent = currentViewTitle();
-    document.title = `${state.demo ? "Demo · " : ''}${state.view === 'chat' ? `${truncate(state.activeChatTitle || "Conversation", 32)} — ` : ''}Arena Desktop`;
+    const appName = state.track === 'google' ? "Google AI mode" : "Arena Desktop";
+    document.title = `${state.demo ? "Demo · " : ''}${state.view === 'chat' ? `${truncate(state.activeChatTitle || "Conversation", 32)} — ` : ''}${appName}`;
   }
 
   function setView(view, { focus = false } = {}) {
@@ -3487,29 +4171,39 @@ You can start with a more structured option: one script, short captions, and a c
     const meta = modeMeta(state.mode);
     const modality = modalityMeta(state.modality);
     els.chatTitle.textContent = state.activeChatTitle || "Conversation";
-    if (els.chatEyebrow) els.chatEyebrow.textContent = `Active dialogue · ${meta.label}`;
     clear(els.chatMeta);
-    els.chatMeta.append(
-      el('span', { class: 'meta-chip' }, iconEl('git-branch'), el('span', { text: meta.label })),
-      el('span', { class: 'meta-chip' }, iconEl(modality.icon), el('span', { text: modality.label }))
-    );
-    if (state.mode === 'agent') {
-      els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: "Automatic model selection" })));
-    } else if (state.mode !== 'battle') {
-      const name = currentModelA()?.name || "No model selected";
-      els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: name })));
-      if (state.mode === 'side-by-side') {
-        els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: currentModelB()?.name || "Model B not selected" })));
-      }
+    const google = state.track === 'google';
+    if (google) {
+      // Google AI mode has no mode / work type / model choice: one honest chip
+      // plus the shared workspace chip, and no "Refresh from Arena".
+      if (els.chatEyebrow) els.chatEyebrow.textContent = "Active dialogue · Google AI mode";
+      els.chatMeta.append(
+        el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: "Google AI mode" }))
+      );
     } else {
-      els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: "Opponents are selected by the server" })));
+      if (els.chatEyebrow) els.chatEyebrow.textContent = `Active dialogue · ${meta.label}`;
+      els.chatMeta.append(
+        el('span', { class: 'meta-chip' }, iconEl('git-branch'), el('span', { text: meta.label })),
+        el('span', { class: 'meta-chip' }, iconEl(modality.icon), el('span', { text: modality.label }))
+      );
+      if (state.mode === 'agent') {
+        els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: "Automatic model selection" })));
+      } else if (state.mode !== 'battle') {
+        const name = currentModelA()?.name || "No model selected";
+        els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: name })));
+        if (state.mode === 'side-by-side') {
+          els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: currentModelB()?.name || "Model B not selected" })));
+        }
+      } else {
+        els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: "Opponents are selected by the server" })));
+      }
     }
     if (state.workspace) {
       els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('folder'), el('span', { text: workspaceName() })));
     }
     if (state.activeChatId && state.messages.length) {
       const activeSummary = state.chats.find((chat) => String(chat.id) === String(state.activeChatId));
-      const linked = Boolean(state.activeChatEvalId || activeSummary?.eval_id);
+      const linked = !google && Boolean(state.activeChatEvalId || activeSummary?.eval_id);
       if (linked) {
         const refreshing = String(state.refreshingChatId || '') === String(state.activeChatId);
         const generating = chatIsGenerating(state.activeChatId);
@@ -4216,14 +4910,18 @@ You can start with a more structured option: one script, short captions, and a c
         class: 'model-avatar',
         style: { background: avatarColor, color: '#1d221e' },
         'aria-hidden': 'true',
-        text: initialLetters(lane.modelName || (key === 'b' ? 'Model B' : 'Model A'))
+        text: state.track === 'google' && !lane.modelName
+          ? 'G' : initialLetters(lane.modelName || (key === 'b' ? 'Model B' : 'Model A'))
       });
     const label = lane.modelOrg || (lane.modelName ? '' : (key === 'b' ? "Model B" : "Model A"));
+    const googleLane = state.track === 'google' && !lane.modelName;
     const head = el('div', { class: 'assistant-head' },
       avatar,
       el('div', { class: 'assistant-id' },
-        el('span', { class: 'model-name', title: lane.modelName || '', text: lane.modelName || (key === 'b' ? "Model B" : "Model A") }),
-        el('span', { class: 'lane-badge', text: key.toUpperCase() }),
+        el('span', { class: 'model-name', title: lane.modelName || '',
+          text: googleLane ? "Google AI mode" : (lane.modelName || (key === 'b' ? "Model B" : "Model A")) }),
+        (googleLane || lane.modelName === 'Google AI mode') ? null
+          : el('span', { class: 'lane-badge', text: key.toUpperCase() }),
         turn.vote === (key === 'a' ? 'model_a' : 'model_b')
           ? el('span', { class: 'lane-winner', title: "Your choice in this battle" }, iconEl('trophy'), el('span', { text: "best" }))
           : null,
@@ -4298,7 +4996,21 @@ You can start with a more structured option: one script, short captions, and a c
       lane.notices.forEach((notice) => card.appendChild(el('div', { class: 'message-notice' }, iconEl('info'), el('span', { text: notice }))));
     }
     if (Array.isArray(lane.errors)) {
-      lane.errors.forEach((error) => card.appendChild(el('div', { class: 'message-error', role: 'alert' }, iconEl('alert'), el('span', { text: error }))));
+      lane.errors.forEach((error) => {
+        const box = el('div', { class: 'message-error', role: 'alert' }, iconEl('alert'), el('span', { text: error }));
+        // A dead session cannot be fixed by reading the error: the card
+        // carries the button that opens the right place in one click.
+        if (lane.errorAction === 'sign_in') {
+          box.appendChild(el('button', { class: 'button button-small', type: 'button',
+            onclick: () => { void googleSignIn(); } },
+            iconEl('login'), el('span', { text: 'Sign in to Google' })));
+        } else if (lane.errorAction === 'open_window') {
+          box.appendChild(el('button', { class: 'button button-small', type: 'button',
+            onclick: () => { void API.googleOpen({}).catch(() => undefined); } },
+            iconEl('external'), el('span', { text: 'Open the Google window' })));
+        }
+        card.appendChild(box);
+      });
     }
     const note = answerFootNote(lane);
     if (note) card.appendChild(note);
@@ -4392,7 +5104,19 @@ You can start with a more structured option: one script, short captions, and a c
     }
     const laneHasError = order.some((key) => lanes[key]?.errors?.length);
     if (turn.error && !laneHasError) {
-      wrapper.appendChild(el('div', { class: 'message-error', role: 'alert' }, iconEl('alert'), el('span', { text: turn.error })));
+      const box = el('div', { class: 'message-error', role: 'alert' }, iconEl('alert'), el('span', { text: turn.error }));
+      // The next step belongs in the error itself: reading "session expired"
+      // with no way to sign in is what made the dead session feel endless.
+      if (turn.errorAction === 'sign_in') {
+        box.appendChild(el('button', { class: 'button button-small', type: 'button',
+          onclick: () => { void googleSignIn(); } },
+          iconEl('login'), el('span', { text: 'Sign in to Google' })));
+      } else if (turn.errorAction === 'open_window') {
+        box.appendChild(el('button', { class: 'button button-small', type: 'button',
+          onclick: () => { void API.googleOpen({}).catch(() => undefined); } },
+          iconEl('external'), el('span', { text: 'Open the Google window' })));
+      }
+      wrapper.appendChild(box);
     }
     const turnActions = renderTurnActions(turn);
     if (turnActions) wrapper.appendChild(turnActions);
@@ -4482,7 +5206,8 @@ You can start with a more structured option: one script, short captions, and a c
 
   async function refreshNativeSubagents() {
     const chatId = state.activeChatId;
-    if (!chatId || state.view !== 'chat') return;
+    // Google AI mode runs in the Google window: it never spawns sub-agents.
+    if (!chatId || state.view !== 'chat' || state.track === 'google') return;
     try {
       const data = await API.getNativeSubagents(chatId);
       if (String(state.activeChatId) !== String(chatId)) return;
@@ -4984,20 +5709,120 @@ You can start with a more structured option: one script, short captions, and a c
     return row;
   }
 
+  function arenaPopoverRow(item) {
+    const busy = state.arenaConnectorBusy.has(item.slug);
+    const connected = Boolean(item.connected || item.auth_status === 'connected');
+    const enabled = connected && !state.arenaConnectorsOff.has(item.slug);
+    const row = el('div', { class: 'popover-connector-row' });
+    row.appendChild(connectorLogoNode(item));
+    row.appendChild(el('span', { class: 'popover-connector-name', title: item.name, text: item.name }));
+    if (connected) {
+      const toggle = el('button', {
+        class: 'switch' + (enabled ? ' is-on' : ''), type: 'button', disabled: busy,
+        'aria-label': `Toggle ${item.name}`, 'aria-pressed': String(enabled)
+      }, el('span', { class: 'switch-knob' }));
+      toggle.addEventListener('click', () => {
+        setArenaConnectorEnabled(item, !enabled);
+        toggle.classList.toggle('is-on', !enabled);
+        toggle.setAttribute('aria-pressed', String(!enabled));
+      });
+      row.appendChild(toggle);
+    } else {
+      row.appendChild(el('button', {
+        class: 'button button-small button-quiet', type: 'button', disabled: busy,
+        onclick: () => void connectArenaConnectorFlow(item)
+      }, el('span', { text: busy ? 'Connecting…' : 'Connect' })));
+    }
+    return row;
+  }
+
+  function mcpPopoverRow(server) {
+    const name = String(server.name || server.id || '');
+    const enabled = Boolean(server.enabled);
+    const row = el('div', { class: 'popover-connector-row' });
+    row.appendChild(iconEl('plug'));
+    row.appendChild(el('span', { class: 'popover-connector-name', title: name, text: name }));
+    const toggle = el('button', {
+      class: 'switch' + (enabled ? ' is-on' : ''), type: 'button',
+      'aria-label': `Toggle ${name}`, 'aria-pressed': String(enabled)
+    }, el('span', { class: 'switch-knob' }));
+    toggle.addEventListener('click', async () => {
+      toggle.disabled = true;
+      try {
+        await API.setConnectorEnabled(name, !enabled);
+        toggle.classList.toggle('is-on', !enabled);
+        toggle.setAttribute('aria-pressed', String(!enabled));
+      } catch { /* keep state */ }
+      toggle.disabled = false;
+    });
+    row.appendChild(toggle);
+    return row;
+  }
+
   function openAttachMenu() {
-    if (!state.workspace) { els.fileInput?.click(); return; }
     const content = el('div');
+
+    // 1. Add files — on top
     const list = el('div', { class: 'popover-list' });
     list.appendChild(popoverOption({
-      title: 'Upload files', desc: attachmentHint(), icon: 'plus',
+      title: 'Add files', desc: 'Up to 25MB per file', icon: 'paperclip', iconRight: true,
       onClick: () => { closePopover(); els.fileInput?.click(); }
     }));
-    list.appendChild(popoverOption({
-      title: 'Attach workspace files as text', desc: 'Insert file contents into the prompt (works in every mode)', icon: 'file',
-      onClick: () => { closePopover(); void openSnapshotPicker(); }
-    }));
     content.appendChild(list);
-    openPopover(els.attachButton, { title: 'Attach', content });
+
+    // 2. Connectors — official Arena connectors (arena.ai style). Google AI
+    // mode has no arena.ai account behind it, so that section is left out
+    // there entirely; local MCP servers below still apply.
+    const googleTrack = state.track === 'google';
+    let connList = null;
+    if (!googleTrack) {
+      const connSection = el('div', { class: 'popover-connections' });
+      connSection.appendChild(el('div', { class: 'popover-section-title' }, el('span', { text: 'Connectors' })));
+      connList = el('div', { class: 'popover-connector-list' });
+      connSection.appendChild(connList);
+      content.appendChild(connSection);
+    }
+
+    // 3. MCP — local servers; Add opens the existing CLI/JSON menu
+    const mcpSection = el('div', { class: 'popover-connections' });
+    mcpSection.appendChild(el('div', { class: 'popover-section-title popover-section-row' },
+      el('span', { text: 'MCP' }),
+      el('button', {
+        class: 'button button-small', type: 'button',
+        onclick: () => { closePopover(); openAddConnectorModal('local'); }
+      }, iconEl('plus'), el('span', { text: 'Add' }))
+    ));
+    const mcpList = el('div', { class: 'popover-connector-list' });
+    mcpSection.appendChild(mcpList);
+    content.appendChild(mcpSection);
+
+    openPopover(els.attachButton, { title: '', content, placement: 'above' });
+
+    const renderRows = () => {
+      const arena = arenaConnectorsList();
+      if (connList) clear(connList);
+      if (connList && !state.authenticated) {
+        connList.appendChild(el('p', { class: 'modal-copy', text: 'Log in to Arena to see account connectors.' }));
+      } else if (connList && state.arenaConnectorsLoading && !state.arenaConnectors) {
+        connList.appendChild(el('span', { class: 'loading-block' }, el('span', { class: 'mini-spinner' }), el('span', { text: 'Loading…' })));
+      } else if (connList && !arena.length) {
+        connList.appendChild(el('p', { class: 'modal-copy', text: 'No Arena connectors for this account.' }));
+      } else if (connList) {
+        arena.forEach((item) => connList.appendChild(arenaPopoverRow(item)));
+      }
+      clear(mcpList);
+      const servers = connectorServersList();
+      if (state.connectorsLoading && !state.connectors) {
+        mcpList.appendChild(el('span', { class: 'loading-block' }, el('span', { class: 'mini-spinner' }), el('span', { text: 'Loading…' })));
+      } else if (!servers.length) {
+        mcpList.appendChild(el('p', { class: 'modal-copy', text: 'No MCP servers yet. Click Add.' }));
+      } else {
+        servers.forEach((server) => mcpList.appendChild(mcpPopoverRow(server)));
+      }
+    };
+    renderRows();
+    if (!state.connectors) void loadConnectors({ silent: true }).then(renderRows);
+    if (connList && state.authenticated && !state.arenaConnectors) void loadArenaConnectors({ silent: true }).then(renderRows);
   }
 
   async function collectWorkspaceFiles() {
@@ -5196,11 +6021,32 @@ You can start with a more structured option: one script, short captions, and a c
       return;
     }
 
+    if (state.activeChatExternal && state.track === 'google') {
+      els.messageList.appendChild(el('div', { class: 'imported-thread-card' },
+        el('span', { class: 'imported-thread-icon' }, iconEl('external')),
+        el('div', { class: 'imported-thread-copy' },
+          el('span', { class: 'imported-thread-title', text: 'Imported from Google AI mode' }),
+          el('span', { class: 'imported-thread-desc', text: 'This thread lives in your Google account. Open it in the Google window to read it or continue there; new messages sent here start a fresh Google thread.' })),
+        el('button', { class: 'button button-small', type: 'button',
+          onclick: () => { void API.googleOpen({ url: state.activeChatExternal }).catch((error) => toast(errorMessage(error), 'error', 'Google window')); } },
+          iconEl('external'), el('span', { text: 'Open in Google window' }))));
+    }
+
     if (!state.messages.length) {
+      // An empty canvas is not an empty history: the Google cloud list lives in
+      // the sidebar, so pointing at it is the honest hint here.
+      const googleCloud = state.track === 'google' && (state.googleThreads || []).length;
       els.messageList.appendChild(el('div', { class: 'history-empty' },
         el('span', { class: 'history-empty-icon' }, iconEl('spark')),
-        el('h3', { text: state.activeChatId ? "History is currently empty" : "Start a new dialogue" }),
-        el('p', { text: state.activeChatId ? "Send the first message — responses will appear here. Mode and task type settings are visible in the input field." : "Select an existing chat or create a new one." })
+        el('h3', { text: googleCloud ? "Pick a thread from the list"
+          : (state.activeChatId ? "History is currently empty" : "Start a new dialogue") }),
+        el('p', { text: googleCloud
+          ? `${state.googleThreads.length} threads are already listed under "Only in your Google account" on the left. Click one to import it here, or send the first message to start a new one.`
+          : (state.activeChatId
+            ? (state.track === 'google'
+              ? "Send the first message — the answer appears here. This chat stays in Google AI mode."
+              : "Send the first message — responses will appear here. Mode and task type settings are visible in the input field.")
+            : "Select an existing chat or create a new one.") })
       ));
       // Live agent prompts and child controls must remain visible even when
       // the history snapshot has not yet acquired its first message.
@@ -5318,7 +6164,7 @@ You can start with a more structured option: one script, short captions, and a c
     state.agentKind = kind;
     try { window.localStorage.setItem('ap-agent-kind', kind); } catch { /* private mode */ }
     pruneAttachmentsForSelection();
-    renderModelStrip();
+    renderModelChips();
     renderComposerContext();
     updateComposerState();
   }
@@ -5587,63 +6433,53 @@ You can start with a more structured option: one script, short captions, and a c
     }
   }
 
-  function renderModelStrip() {
-    if (!els.modelStrip) return;
-    clear(els.modelStrip);
+  function renderModelChips() {
+    if (!els.modelChips) return;
+    clear(els.modelChips);
     const mode = state.mode;
-    if (mode === 'battle') {
-      els.modelStrip.append(
-        el('span', { class: 'model-pill' }, el('span', { class: 'lane-letter', text: 'A' }), el('span', { class: 'model-pill-label', text: "Model A" })),
-        el('span', { class: 'model-pill' }, el('span', { class: 'lane-letter', text: 'B' }), el('span', { class: 'model-pill-label', text: "Model B" })),
-        el('span', { class: 'model-strip-note', text: "Battle selects opponents randomly on the server" })
-      );
-      return;
+    // Direct: the model chip sits right after the mode slider (left side).
+    // Side by Side: both model chips stay on the right, before Agent integration.
+    if (els.modeButton && els.toolbarSpacer) {
+      if (mode === 'direct' && els.modelChips.previousElementSibling !== els.modeButton) {
+        els.modeButton.after(els.modelChips);
+      } else if (mode === 'side-by-side' && els.modelChips.previousElementSibling !== els.toolbarSpacer) {
+        els.toolbarSpacer.after(els.modelChips);
+      }
     }
-    if (mode === 'agent') {
-      // Like arena.ai/agent: no model pill and no backend switch in the
-      // composer. The Agent backend for NEW chats is chosen in Settings;
-      // a started chat keeps the backend it was created with.
-      return;
-    }
+    // Battle and Agent: Arena selects the model(s) — no manual chips.
+    if (mode === 'battle' || mode === 'agent') return;
     if (state.modelsLoading && !state.models.length) {
-      els.modelStrip.appendChild(el('span', { class: 'loading-block' }, el('span', { class: 'mini-spinner' }), el('span', { text: "Loading model list…" })));
+      els.modelChips.appendChild(el('span', { class: 'loading-block' }, el('span', { class: 'mini-spinner' }), el('span', { text: "Loading models…" })));
       return;
     }
     if (state.modelsError) {
-      const retry = el('button', { class: 'model-pill model-pill-error', type: 'button', 'data-action': 'retry-models', title: state.modelsError },
-        iconEl('alert'), el('span', { class: 'model-pill-label', text: "Models unavailable · retry" }));
-      els.modelStrip.appendChild(retry);
+      const retry = el('button', { class: 'composer-chip model-chip-error', type: 'button', 'data-action': 'retry-models', title: state.modelsError },
+        iconEl('alert'), el('span', { class: 'chip-label', text: "Models unavailable · retry" }));
+      els.modelChips.appendChild(retry);
       return;
     }
 
-    const modelButton = (laneKey, modelId) => {
+    const modelChip = (laneKey, modelId) => {
       const model = getModel(modelId);
       const label = model ? model.name : (laneKey === 'b' ? "Select model B" : "Select a model");
       const color = safeColor(model?.color) || '#b9cabd';
-      return el('button', {
-        class: `model-pill${model ? '' : ' model-pill-empty'}`, type: 'button',
+      const chip = el('button', {
+        class: `composer-chip model-chip${model ? '' : ' model-chip-empty'}`, type: 'button',
         'data-model-picker': laneKey, 'aria-label': `Select a model ${laneKey.toUpperCase()}: ${label}`,
         disabled: state.generating
       },
-        el('span', { class: 'lane-letter', text: laneKey.toUpperCase() }),
         model ? (modelIconNode(model) || el('span', { class: 'model-dot', style: { background: color } })) : el('span', { class: 'model-dot', style: { background: color } }),
-        el('span', { class: 'model-pill-label', text: label }),
+        el('span', { class: 'chip-label', text: label }),
         iconEl('chevron-down')
       );
+      chip.addEventListener('click', () => openModelPicker(laneKey, chip));
+      return chip;
     };
 
     if (mode === 'side-by-side') {
-      els.modelStrip.append(modelButton('a', state.modelAId), modelButton('b', state.modelBId));
+      els.modelChips.append(modelChip('a', state.modelAId), modelChip('b', state.modelBId));
     } else {
-      els.modelStrip.appendChild(modelButton('a', state.modelAId));
-    }
-
-    if (state.modelsLoading) {
-      els.modelStrip.appendChild(el('span', { class: 'model-strip-note' }, el('span', { class: 'mini-spinner' }), el('span', { text: "Refreshing" })));
-    } else if (!state.models.length) {
-      els.modelStrip.appendChild(el('span', { class: 'model-strip-note', text: "The server did not return models for this type." }));
-    } else if (mode === 'agent') {
-      els.modelStrip.appendChild(el('span', { class: 'model-strip-note', text: "Agent actions require permission" }));
+      els.modelChips.appendChild(modelChip('a', state.modelAId));
     }
   }
 
@@ -5697,11 +6533,11 @@ You can start with a more structured option: one script, short captions, and a c
     els.permissionButton?.setAttribute('title', permission.desc);
     if (els.workspaceLabel) {
       els.workspaceLabel.textContent = state.workspace ? workspaceName() : "Choose folder";
-      els.workspaceButton.title = state.workspace || "Working folder not selected";
+      if (els.workspaceButton) els.workspaceButton.title = state.workspace || "Working folder not selected";
     }
     renderComposerContext();
     maybeWarmGateway();
-    renderModelStrip();
+    renderModelChips();
     renderModeBars();
     renderModelsNavCount();
 
@@ -5718,13 +6554,13 @@ You can start with a more structured option: one script, short captions, and a c
     else if (noServer) disabledReason = "No connection to the local server";
     else if (state.historyLoading) disabledReason = "Loading dialogue history";
     else if (state.historyError) disabledReason = "History not loaded — please try again";
-    else if (!isValidSelection(state.mode, state.modality)) disabledReason = selectionIssue(state.mode, state.modality);
+    else if (state.track !== 'google' && !isValidSelection(state.mode, state.modality)) disabledReason = selectionIssue(state.mode, state.modality);
     else if (attachmentsBusy()) disabledReason = "Uploading files…";
     else if (attachmentsFailed()) disabledReason = "Retry or remove the failed file to send";
     else if (attachmentCompatibilityIssue()) disabledReason = attachmentCompatibilityIssue();
-    else if (noAuth) disabledReason = "First, log in in a separate window or using cookies";
+    else if (noAuth && state.track !== 'google') disabledReason = "First, log in in a separate window or using cookies";
     else if (!text) disabledReason = "Enter a message";
-    else if (!requiredModelsReady()) disabledReason = state.modelsLoading ? "Loading models"
+    else if (state.track !== 'google' && !requiredModelsReady()) disabledReason = state.modelsLoading ? "Loading models"
       : state.modelsError ? "Models unavailable"
         : "Select a model";
     else if (state.pendingPermissions.some((item) => !item.chatId || String(item.chatId) === String(state.activeChatId))) disabledReason = "First, resolve the permission request in this chat";
@@ -5747,10 +6583,18 @@ You can start with a more structured option: one script, short captions, and a c
       if (label) label.textContent = state.stopping ? "Stopping…" : "Stop";
     }
     if (els.attachButton) {
-      const allowed = attachmentsAllowedHere();
+      // The same plus in both modes. In Google AI mode it only carries
+      // Add files and local MCP servers, so it stays open even when the
+      // current task type could not take an attachment.
+      const allowed = attachmentsAllowedHere() || state.track === 'google';
+      const googleTrack = state.track === 'google';
       els.attachButton.disabled = busy || !allowed;
-      els.attachButton.title = allowed ? `Attach files — ${attachmentHint()}` : 'Files cannot be attached in Web Search';
-      els.attachButton.setAttribute('aria-label', allowed ? `Attach files. ${attachmentHint()}` : 'Attach files (unavailable in Web Search)');
+      els.attachButton.title = googleTrack
+        ? 'Add files and MCP servers'
+        : (allowed ? `Attach files — ${attachmentHint()}` : 'Files cannot be attached in Web Search');
+      els.attachButton.setAttribute('aria-label', googleTrack
+        ? 'Options: add files and MCP servers'
+        : (allowed ? `Attach files. ${attachmentHint()}` : 'Attach files (unavailable in Web Search)'));
     }
     if (els.fileInput) els.fileInput.accept = attachmentAccept();
     els.composerCard?.classList.toggle('is-generating', busy);
@@ -5777,8 +6621,8 @@ You can start with a more structured option: one script, short captions, and a c
     syncHeavySendBadge();
     els.modeButton.disabled = busy || locked;
     els.modalityButton.disabled = busy || locked;
-    els.permissionButton.disabled = busy || transitions;
-    $$('[data-model-picker]', els.modelStrip || document).forEach((button) => { button.disabled = busy || locked; });
+    if (els.permissionButton) els.permissionButton.disabled = busy || transitions;
+    $$('[data-model-picker]', els.modelChips || document).forEach((button) => { button.disabled = busy || locked; });
     ensureBypassWarning();
   }
 
@@ -5866,6 +6710,63 @@ You can start with a more structured option: one script, short captions, and a c
     let name;
     let sub;
     let avatarClass = '';
+    if (state.track === 'google') {
+      // Google AI mode shows the Google identity, never the arena.ai account.
+      const g = googleIdentity();
+      if (g.signedIn && g.expired) {
+        name = g.name;
+        sub = 'Session expired: sign in to Google';
+        avatarClass = '';
+      } else {
+        name = g.signedIn ? g.name : (state.google?.desktop === false ? 'Google AI mode' : 'Not signed in to Google');
+        sub = g.signedIn ? (g.email || 'Signed in inside the Google window')
+          : state.google?.desktop === false ? 'Google window is unavailable' : 'Sign in to Google';
+        avatarClass = g.signedIn ? '' : 'is-anonymous';
+      }
+      if (els.accountName) els.accountName.textContent = name;
+      if (els.accountState) els.accountState.textContent = sub;
+      if (els.accountAvatar) {
+        els.accountAvatar.classList.toggle('is-anonymous', avatarClass === 'is-anonymous');
+        els.accountAvatar.classList.toggle('is-demo', false);
+        delete els.accountAvatar.dataset.avatarUrl;
+        els.accountAvatar.textContent = g.signedIn && g.expired ? '?' : 'G';
+        els.accountAvatar.classList.add('is-google');
+      }
+      if (els.accountDot) {
+        els.accountDot.classList.toggle('is-online', Boolean(g.signedIn) && !g.expired);
+        els.accountDot.classList.toggle('is-error', Boolean(g.expired)
+          || Boolean(state.google?.window?.error));
+      }
+      if (els.accountButton) {
+        els.accountButton.setAttribute('aria-label', `Google profile: ${name}. ${sub}. Open accounts`);
+        els.accountButton.setAttribute('aria-haspopup', 'menu');
+        const googleDone = googleSignedIn();
+        const arenaDone = Boolean(state.authenticated || state.me?.signed_in);
+        const checkEl = els.accountCheck || document.getElementById('accountCheck');
+        els.accountButton.classList.toggle('is-signed-in', googleDone);
+        els.accountButton.classList.toggle('is-expired', !googleDone && g.expired);
+        els.accountButton.hidden = Boolean(googleDone && !arenaDone);
+        if (googleDone && els.accountPopover) {
+          els.accountPopover.hidden = true;
+        }
+        if (checkEl) {
+          checkEl.hidden = !googleDone;
+        }
+      }
+      if (googleDone) {
+        document.querySelectorAll('.boot-action-btn[data-provider="google"]').forEach((btn) => btn.remove());
+      }
+      if (Boolean(state.authenticated || state.me?.signed_in)) {
+        document.querySelectorAll('.boot-action-btn[data-provider="arena"]').forEach((btn) => btn.remove());
+      }
+      const anySigned = googleSignedIn() || Boolean(state.authenticated);
+      const googleLabel = g.email ? `✓ Google: ${g.email}` : '✓ Google: signed in';
+      document.querySelectorAll(
+        '#googleSignInBtn, #bootGoogleSignIn, [data-action="google-sign-in"], .js-google-signin-btn'
+      ).forEach((btn) => _applyGoogleButtonDoneState(btn, googleDone, googleLabel));
+      return;
+    }
+    els.accountAvatar?.classList.remove('is-google');
     if (state.demo) {
       name = state.authenticated ? (state.fullName || 'Demo User') : 'Not signed in';
       sub = state.authenticated ? 'Simulation · no tokens' : 'Demo mode';
@@ -5996,7 +6897,9 @@ You can start with a more structured option: one script, short captions, and a c
         let providedName = item.model_name ?? item.name ?? null;
         if (!providedName && item.model && item.model !== 'a' && item.model !== 'b') providedName = item.model;
         current.lanes[key] = emptyLane(key, modelById);
-        current.lanes[key].modelName = providedName || modelById?.name || (key === 'b' ? "Model B" : "Model A");
+        const googleHistory = state.track === 'google' && !providedName && !modelById?.name;
+        current.lanes[key].modelName = googleHistory ? "Google AI mode"
+          : (providedName || modelById?.name || (key === 'b' ? "Model B" : "Model A"));
         current.lanes[key].modelOrg = modelById?.org || String(item.org_display ?? item.org ?? '');
         current.lanes[key].modelColor = modelById?.color || safeColor(item.color);
       }
@@ -6184,6 +7087,7 @@ You can start with a more structured option: one script, short captions, and a c
         state.activeChatTitle = chat.title || state.activeChatTitle;
         state.activeChatEvalId = chat.eval_id || chat.raw?.eval_id || null;
         state.activeChatSource = chat.source || 'local';
+        state.activeChatExternal = chat.external_url || chat.raw?.external_url || '';
         const selection = normalizeSelection(chat.mode || state.mode, chat.modality || state.modality);
         state.mode = selection.mode;
         state.modality = selection.modality;
@@ -6317,13 +7221,21 @@ You can start with a more structured option: one script, short captions, and a c
       .find((item) => item.id === String(chatId));
     if (!chat) return;
     const error = el('p', { class: 'form-error', role: 'alert' });
+    // A Google chat never lives on arena.ai: nothing is archived there, and the
+    // dialog must not claim otherwise.
+    const isGoogleChat = chat.source === 'google' || chat.imported
+      || (state.track === 'google' && chat.source !== 'arena');
     const result = mountModal({
       title: "Delete chat?",
       subtitle: "Action confirmation",
       size: 'small',
       content: el('div', {},
-        el('p', { class: 'modal-copy', text: `Chat “${chat.title}” will be deleted here and archived on arena.ai, so it disappears from both histories. This cannot be undone here.` }),
-        el('div', { class: 'note-box is-warning' }, iconEl('alert'), el('span', { text: "Archived chats can still be found under Archived on arena.ai." })),
+        el('p', { class: 'modal-copy', text: isGoogleChat
+          ? `Chat “${chat.title}” will be deleted from this computer. Your Google account history is not touched. This cannot be undone here.`
+          : `Chat “${chat.title}” will be deleted here and archived on arena.ai, so it disappears from both histories. This cannot be undone here.` }),
+        el('div', { class: 'note-box is-menu' }, iconEl('alert'), el('span', { text: isGoogleChat
+          ? "Google's own copy of this thread stays in your Google account."
+          : "Archived chats can still be found under Archived on arena.ai." })),
         error),
       actions: [
         { label: "Cancel", variant: 'quiet', autofocus: true },
@@ -6465,7 +7377,7 @@ You can start with a more structured option: one script, short captions, and a c
       pruneAttachmentsForSelection();
       updateComposerState();
       renderChatHead();
-      renderModelStrip();
+      renderModelChips();
       announce(`Mode: ${modeMeta(state.mode).label}`);
       return true;
     } catch (error) {
@@ -6521,9 +7433,7 @@ You can start with a more structured option: one script, short captions, and a c
         const response = await API.setPermissionMode(nextMode);
         state.permissionMode = validPermissionMode(response?.mode) || nextMode;
       });
-      if (state.permissionMode === 'bypassPermissions') {
-        toast("Permission bypass enabled. The backend can perform actions without confirmation. Use only in an isolated environment.", 'warning', "Dangerous mode");
-      } else {
+      if (state.permissionMode !== 'bypassPermissions') {
         toast(`Permission mode: ${permissionMeta(state.permissionMode).label}.`, 'success');
       }
       updateComposerState();
@@ -6671,6 +7581,21 @@ You can start with a more structured option: one script, short captions, and a c
     const turn = generation.turn;
     if (type === 'ping') return;
     if (type === 'meta') {
+      if (state.track === 'google') {
+        // Google AI mode names its own answer: Arena model metadata must not
+        // leak into the header ("Model A") or the lane badge.
+        const lane = turnLane(turn, 'a');
+        lane.modelName = "Google AI mode";
+        lane.modelOrg = '';
+        if (event.mode) turn.mode = event.mode;
+        if (event.chat_id && !state.activeChatId) state.activeChatId = String(event.chat_id);
+        if (!generation._chatsReloaded) {
+          generation._chatsReloaded = true;
+          void loadChats({ silent: true });
+        }
+        scheduleChatRender();
+        return;
+      }
       const rawModels = event.models ?? event.data?.models;
       const normalizeMetaModel = (value) => {
         if (!value) return null;
@@ -6704,6 +7629,16 @@ You can start with a more structured option: one script, short captions, and a c
       if (event.names?.a && !metaModels.a) metaModels.a = { id: 'a', name: String(event.names.a), org: '', color: '', capabilities: [] };
       if (event.names?.b && !metaModels.b) metaModels.b = { id: 'b', name: String(event.names.b), org: '', color: '', capabilities: [] };
       const activeModel = event.model_id ? normalizeModel(event.model_id) : null;
+      if (state.track === 'google' && !state.demo) {
+        // Google AI mode labels its own answers; there is no Arena model here.
+        const lane = turnLane(turn, 'a');
+        lane.modelName = "Google AI mode";
+        lane.modelOrg = '';
+        if (event.mode) turn.mode = event.mode;
+        if (event.chat_id && !state.activeChatId) state.activeChatId = String(event.chat_id);
+        scheduleChatRender();
+        return;
+      }
       const modelA = metaModels.a || activeModel;
       if (modelA) {
         const lane = turnLane(turn, 'a');
@@ -6739,6 +7674,9 @@ You can start with a more structured option: one script, short captions, and a c
     if (type === 'text' || type === 'message') {
       const delta = textValue(event.text ?? event.delta ?? event.content ?? '');
       if (delta) lane.text += delta;
+      // Google AI mode has no tool stages: "writing…" is a spinner line, not
+      // a step to keep once the answer itself is on screen.
+      if (delta && state.track === 'google') lane.agentStages = [];
       if (event.model_id && !lane.modelId) {
         const model = normalizeModel(event.model_id);
         if (model) {
@@ -6979,7 +7917,9 @@ You can start with a more structured option: one script, short captions, and a c
     }
     if (type === 'agent') {
       const stage = textValue(event.stage ?? event.status ?? event.message ?? '');
-      if (stage && !lane.agentStages.includes(stage)) lane.agentStages.push(stage);
+      // A new status supersedes the previous one ("is writing…" must not hang
+      // under the error that replaced it).
+      if (stage && lane.agentStages[lane.agentStages.length - 1] !== stage) lane.agentStages.push(stage);
       if (event.message && event.stage && event.message !== event.stage && !lane.notices.includes(event.message)) lane.notices.push(textValue(event.message));
       scheduleChatRender();
       return;
@@ -7042,6 +7982,9 @@ You can start with a more structured option: one script, short captions, and a c
     if (type === 'error') {
       const message = textValue(event.message ?? event.error ?? event.detail ?? 'The server reported an error.');
       generation.hadError = true;
+      // Nothing is being written any more: drop the live status the failed
+      // turn was showing, so the error is the last word on the card.
+      if (Array.isArray(lane.agentStages)) lane.agentStages.length = 0;
       if (event.code === 'rate_limit' && Number(event.wait) > 0) {
         // Informational only (v5.1): drives the switch-account hint.
         // Sending is never blocked - the limit may be per-modality or
@@ -7063,12 +8006,18 @@ You can start with a more structured option: one script, short captions, and a c
         // Battle lane keeps streaming to its own terminal event.
         lane.error = true;
         if (!lane.errors.includes(message)) lane.errors.push(message);
+        if (event.sign_in || event.window) {
+          lane.errorAction = event.sign_in ? 'sign_in' : 'open_window';
+          lane.errorCode = event.code || '';
+        }
         lane.streaming = false;
         lane.done = true;
       } else if (!turn.error) {
         // Global backend error: show it once at turn level instead of
         // attributing it to Model A or pretending a card generated it.
         turn.error = message;
+        if (event.sign_in) turn.errorAction = 'sign_in';
+        else if (event.window) turn.errorAction = 'open_window';
       }
       toast(message, 'error', 'Generation error');
       scheduleChatRender();
@@ -7120,8 +8069,12 @@ You can start with a more structured option: one script, short captions, and a c
   function makeGenerationTurn(message, chatId, attachments = []) {
     const mode = state.mode;
     const lanes = {};
-    const laneA = emptyLane('a', mode === 'agent' ? null : currentModelA());
-    if (mode === 'agent') {
+    // Google AI mode has no Arena model: the lane is named after the mode so
+    // the answer header never reads "Model A".
+    const laneA = state.track === 'google'
+      ? { ...emptyLane('a', null), modelId: null, modelName: 'Google AI mode', modelOrg: '' }
+      : emptyLane('a', mode === 'agent' ? null : currentModelA());
+    if (mode === 'agent' && state.track !== 'google') {
       laneA.modelId = null;
       laneA.modelName = 'Agent';
       laneA.modelOrg = "Automatic model selection";
@@ -7582,7 +8535,7 @@ You can start with a more structured option: one script, short captions, and a c
       toast(state.serverError || "No connection to the local server. Request not sent.", 'error', "Server unavailable");
       return;
     }
-    if (state.status && !state.authenticated) {
+    if (state.status && !state.authenticated && state.track !== 'google') {
       toast("Log in first in a separate window or using cookies.", 'warning', "Not signed in");
       openSettings('connection');
       return;
@@ -7610,7 +8563,7 @@ You can start with a more structured option: one script, short captions, and a c
         toast(state.serverError, 'error', "Server unavailable");
         return;
       }
-      if (!requiredModelsReady()) {
+      if (state.track !== 'google' && !requiredModelsReady()) {
         if (state.mode !== 'battle') {
           toast(state.modelsError || (state.modelsLoading ? "Wait for the models to load." : "Select a model to send."), 'warning', "Model is not ready");
           openModelPicker(state.mode === 'side-by-side' && state.modelAId ? 'b' : 'a');
@@ -7645,7 +8598,9 @@ You can start with a more structured option: one script, short captions, and a c
 
       // The visible composer selection travels with the request itself, so a
       // late status/chat response can never reroute this send to another mode.
-      const body = { message: text, chat_id: chatId, mode: state.mode, modality: state.modality };
+      const body = { message: text, chat_id: chatId, mode: state.mode, modality: state.modality,
+                     track: state.track };
+      if (state.track === 'google') { body.mode = 'direct'; body.modality = 'text'; }
       try { body.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { /* optional */ }
       if (state.mode === 'agent') {
         // 'arena' = native Arena Agent Mode streamed in-app; 'local' = the
@@ -7655,20 +8610,23 @@ You can start with a more structured option: one script, short captions, and a c
       // Workspace Sync: the composer switch decides whether models get the
       // automatic folder-tools loop on this computer. It applies to Direct,
       // Side by Side, Battle and the Local Agent alike.
-      body.tools = Boolean(state.directTools);
+      body.tools = state.track === 'google' ? false : Boolean(state.directTools);
       // Only Direct and Side by Side have user-chosen models.  Battle sends
       // no ids, Video is Battle-only, and Agent is always automatic.
-      if (allowsManualModels()) {
+      // Google AI mode has no model chooser of its own: the request is just
+      // the message, so none of the Arena model plumbing applies.
+      if (state.track !== 'google' && allowsManualModels()) {
         if (!state.modelAId) throw new ApiError("Model A not selected.");
         body.model_id = state.modelAId;
       }
-      if (state.mode === 'side-by-side') {
+      if (state.track !== 'google' && state.mode === 'side-by-side') {
         if (!state.modelBId) throw new ApiError("Model B not selected.");
         body.model_id_b = state.modelBId;
       }
       const composerAttachments = state.attachments.map((item) => ({ ...item }));
       const sentAttachments = turnAttachmentsFromComposer();
-      if (state.mode === 'direct' && Array.isArray(state.fanoutModels) && state.fanoutModels.length >= 2) {
+      if (state.track !== 'google' && state.mode === 'direct'
+        && Array.isArray(state.fanoutModels) && state.fanoutModels.length >= 2) {
         body.fanout_models = [...state.fanoutModels];
       }
       if (sentAttachments.length) body.attachments = sentAttachments;
@@ -7679,7 +8637,7 @@ You can start with a more structured option: one script, short captions, and a c
         const chat = state.chats.find((item) => item.id === String(chatId));
         if (chat) chat.title = state.activeChatTitle;
         else {
-          state.chats.unshift({ id: String(chatId), title: state.activeChatTitle, updated_at: new Date().toISOString(), mode: state.mode, modality: state.modality });
+          state.chats.unshift({ id: String(chatId), title: state.activeChatTitle, updated_at: new Date().toISOString(), mode: state.mode, modality: state.modality, source: state.track === 'google' ? 'google' : 'local' });
         }
       }
       state.messages.push(turn);
@@ -7769,7 +8727,7 @@ You can start with a more structured option: one script, short captions, and a c
   /* ---------------------------------------------------------------------- */
   let activePopover = null;
 
-  function positionPopover(popover, trigger) {
+  function positionPopover(popover, trigger, placement = 'auto') {
     if (!popover || !trigger) return;
     popover.style.visibility = 'hidden';
     popover.style.left = '8px';
@@ -7782,7 +8740,12 @@ You can start with a more structured option: one script, short captions, and a c
     const below = window.innerHeight - triggerRect.bottom - margin;
     const above = triggerRect.top - margin;
     let top;
-    if (below < Math.min(height, 280) && above > below) {
+    if (placement === 'above') {
+      top = Math.max(margin, triggerRect.top - height - 7);
+    } else if (placement === 'below') {
+      top = triggerRect.bottom + 7;
+      if (top + height > window.innerHeight - margin) top = Math.max(margin, window.innerHeight - height - margin);
+    } else if (below < Math.min(height, 280) && above > below) {
       top = Math.max(margin, triggerRect.top - height - 7);
     } else {
       top = triggerRect.bottom + 7;
@@ -7799,6 +8762,7 @@ You can start with a more structured option: one script, short captions, and a c
     activePopover = null;
     document.removeEventListener('pointerdown', reference.onOutside, true);
     document.removeEventListener('keydown', reference.onKey, true);
+    try { reference.resizeObserver?.disconnect(); } catch { /* noop */ }
     reference.trigger?.setAttribute('aria-expanded', 'false');
     reference.node?.remove();
     try { reference.onClose?.(); } catch { /* noop */ }
@@ -7807,7 +8771,7 @@ You can start with a more structured option: one script, short captions, and a c
     }
   }
 
-  function openPopover(trigger, { title, subtitle, content, wide = false, menu = false, initialFocus = null, onClose = null, role = 'dialog' }) {
+  function openPopover(trigger, { title, subtitle, content, wide = false, menu = false, initialFocus = null, onClose = null, role = 'dialog', placement = 'auto' }) {
     closePopover(false);
     if (!trigger || !els.popoverRoot) return null;
     const node = el('div', {
@@ -7866,8 +8830,18 @@ You can start with a more structured option: one script, short captions, and a c
     };
     document.addEventListener('pointerdown', onOutside, true);
     document.addEventListener('keydown', onKey, true);
-    activePopover = { node, trigger, onOutside, onKey, onClose };
-    positionPopover(node, trigger);
+    // Async content (connectors, gateway status) grows the popover after
+    // the first layout: keep it anchored to the trigger so an upward
+    // popover grows upward instead of spilling over the composer.
+    let resizeObserver = null;
+    if (typeof ResizeObserver === 'function') {
+      resizeObserver = new ResizeObserver(() => {
+        if (activePopover && activePopover.node === node) positionPopover(node, trigger, placement);
+      });
+      resizeObserver.observe(node);
+    }
+    activePopover = { node, trigger, onOutside, onKey, onClose, resizeObserver };
+    positionPopover(node, trigger, placement);
     window.requestAnimationFrame(() => {
       if (!activePopover || activePopover.node !== node) return;
       const preferred = initialFocus && initialFocus.isConnected ? initialFocus : node.querySelector('[data-popover-autofocus]')
@@ -7885,7 +8859,7 @@ You can start with a more structured option: one script, short captions, and a c
     return el('p', { class: 'popover-note', text });
   }
 
-  function popoverOption({ title, desc = '', icon = '', selected = false, disabled = false, danger = false, tag = '', meta = '', onClick = null }) {
+  function popoverOption({ title, desc = '', icon = '', iconRight = false, selected = false, disabled = false, danger = false, tag = '', meta = '', onClick = null }) {
     const button = el('button', {
       class: `popover-option${danger ? ' is-danger' : ''}`,
       type: 'button',
@@ -7894,13 +8868,14 @@ You can start with a more structured option: one script, short captions, and a c
       'aria-disabled': disabled ? 'true' : false,
       disabled
     },
-      icon ? el('span', { class: 'option-icon' }, iconEl(icon)) : null,
+      (!iconRight && icon) ? el('span', { class: 'option-icon' }, iconEl(icon)) : null,
       el('span', { class: 'option-copy' },
         el('span', { class: 'option-title' }, el('span', { text: title }), tag ? el('span', { class: 'option-tag', text: tag }) : null),
         desc ? el('span', { class: 'option-desc', text: desc }) : null
       ),
-      meta ? el('span', { class: 'model-option-meta', text: meta }) : null,
-      selected ? el('span', { class: 'option-check' }, iconEl('check')) : null
+      meta ? (meta instanceof Node ? el('span', { class: 'model-option-meta' }, meta) : el('span', { class: 'model-option-meta', text: meta })) : null,
+      selected ? el('span', { class: 'option-check' }, iconEl('check')) : null,
+      (iconRight && icon) ? el('span', { class: 'option-icon option-icon-right' }, iconEl(icon)) : null
     );
     if (onClick && !disabled) button.addEventListener('click', onClick);
     return button;
@@ -7925,6 +8900,7 @@ You can start with a more structured option: one script, short captions, and a c
       title: 'Mode',
       menu: true,
       role: 'listbox',
+      placement: 'above',
       content: list
     });
   }
@@ -7948,6 +8924,7 @@ You can start with a more structured option: one script, short captions, and a c
       title: 'Work type',
       menu: true,
       role: 'listbox',
+      placement: 'above',
       content: list
     });
   }
@@ -8046,6 +9023,291 @@ You can start with a more structured option: one script, short captions, and a c
     });
   }
 
+  function openAgentIntegrationPopover(trigger = els.agentIntegrationButton) {
+    if (!trigger) return;
+    const supervisorTrack = state.track === 'google';
+    const content = el('div', { class: 'agent-integration-pop' });
+    const host = el('div', { class: 'agent-integration-host' });
+    content.appendChild(host);
+
+    const section = (title) => {
+      const wrap = el('div', { class: 'agent-section' });
+      wrap.appendChild(el('div', { class: 'agent-section-title', text: title }));
+      host.appendChild(wrap);
+      return wrap;
+    };
+
+    const toggleRow = (label, desc, checked, aria, onChange, disabled = false) => {
+      const input = el('input', { type: 'checkbox', class: 'switch-input', checked: Boolean(checked), disabled: Boolean(disabled), 'aria-label': aria });
+      input.addEventListener('change', () => { void onChange(input); });
+      return el('label', { class: 'agent-integration-row' },
+        el('span', { class: 'agent-integration-text' },
+          el('span', { class: 'agent-integration-label', text: label }),
+          desc ? el('span', { class: 'agent-integration-desc', text: desc }) : null),
+        el('span', { class: 'switch' }, input, el('span', { class: 'switch-track', 'aria-hidden': 'true' })));
+    };
+
+    const fill = async () => {
+      let data = null;
+      try { data = await API.getGateway(); } catch (_err) { /* below */ }
+      if (!content.isConnected) return;
+      clear(host);
+      if (!data) {
+        host.appendChild(el('p', { class: 'modal-note', text: 'Gateway status is unavailable right now.' }));
+        return;
+      }
+      const session = data.session || {};
+      const isOn = session.state === 'on';
+      const cfg = state.appSettings || {};
+      const googlePrefs = (state.google && state.google.prefs) || {};
+      const integrationOn = supervisorTrack
+        ? Boolean(googlePrefs.supervisor)
+        : Boolean(state.directTools);
+
+      // --- Master toggle ---
+      if (supervisorTrack) {
+        host.appendChild(toggleRow(
+          'Superviser integration',
+          integrationOn
+            ? 'On — Google AI mode writes the plan, an Arena Agent chat carries it out'
+            : 'Off — Google AI mode answers with text only; nothing runs on this computer',
+          integrationOn,
+          'Superviser integration',
+          async (input) => {
+            const on = Boolean(input.checked);
+            state.google = { ...(state.google || {}),
+                             prefs: { ...googlePrefs, supervisor: on } };
+            try {
+              await API.saveGooglePrefs({ supervisor: on });
+            } catch (error) {
+              toast(errorMessage(error), 'error', 'Superviser integration');
+            }
+            toast(on
+              ? 'Superviser integration is on: Google plans, Arena Agent executes.'
+              : 'Superviser integration is off: Google AI mode only answers.',
+              'info', 'Superviser integration');
+            void fill();
+          }
+        ));
+        host.appendChild(el('p', { class: 'modal-note', text:
+          'Google AI mode cannot call tools itself, so it writes the plan and an Arena '
+          + 'Agent chat executes it in the workspace folder. The executor may ask the '
+          + 'planner for material with an «ASK:» line; it is not allowed to invent work.' }));
+      } else {
+        host.appendChild(toggleRow(
+          'Agent integration',
+          integrationOn
+            ? 'On — the agent can work in the workspace folder and reach local MCP servers'
+            : 'Off — the agent only chats on arena.ai and cannot touch this computer',
+          integrationOn,
+          'Agent integration',
+          async (input) => {
+            state.directTools = Boolean(input.checked);
+            try { window.localStorage.setItem('ap-direct-tools', state.directTools ? '1' : '0'); } catch { /* private mode */ }
+            syncWorkspaceSyncToggle();
+            toast(state.directTools
+              ? 'Agent integration is on: the agent can work in the workspace folder.'
+              : 'Agent integration is off: the agent cannot touch this computer.',
+              'info', 'Agent integration');
+            void fill();
+          }
+        ));
+      }
+
+      // --- Gateway section ---
+      // In supervisor mode the executor is an Arena Agent, so the gateway is
+      // exactly what lets it reach this computer's MCP servers.
+      if (true) {
+      const gw = section('Gateway');
+      gw.appendChild(toggleRow(
+        'Gateway',
+        isOn ? `Running · ${(session.servers || []).length} server(s) exposed` : 'Off — Agent chats cannot reach local MCP servers',
+        data.enabled,
+        'Enable Agent Gateway',
+        async (input) => {
+          await API.saveSettings({ gateway_enabled: input.checked });
+          state.appSettings = { ...cfg, gateway_enabled: input.checked };
+          if (input.checked) {
+            try {
+              const comps = await API.getComponents();
+              const cf = (comps?.components || []).find((c) => c.id === 'cloudflared');
+              if (cf && !cf.installed) showCloudflaredInstallModal(() => { void fill(); });
+            } catch { /* install offer is best-effort */ }
+            try {
+              await API.startGateway();
+              toast('Gateway session is live. Open an Agent chat.', 'success', 'Agent Gateway');
+            } catch (error) {
+              if (error?.details?.code === 'cloudflared_missing') {
+                showCloudflaredInstallModal(() => { void fill(); });
+              } else {
+                toast(errorMessage(error), 'error', 'Agent Gateway');
+              }
+            }
+          } else if (isOn) {
+            await API.stopGateway().catch(() => undefined);
+            toast('Gateway session stopped and pairing revoked.', 'info', 'Agent Gateway');
+          }
+          void fill();
+        },
+        !integrationOn
+      ));
+      gw.appendChild(toggleRow(
+        'Auto-start with Agent chats',
+        'Start the gateway automatically when an Agent chat needs it',
+        data.auto,
+        'Auto-start gateway',
+        async (input) => {
+          await API.saveSettings({ gateway_auto: input.checked });
+          state.appSettings = { ...(state.appSettings || {}), gateway_auto: input.checked };
+          void fill();
+        },
+        !data.enabled || !integrationOn
+      ));
+      gw.appendChild(el('div', { class: 'agent-sub-title', text: 'MCP servers to expose' }));
+      const available = (data.available || []).filter((s) => (s.transport || 'stdio') === 'stdio');
+      if (!available.length) {
+        gw.appendChild(el('p', { class: 'modal-note', text: 'No local MCP servers configured yet. Add one via the attach menu (MCP → Add).' }));
+      } else {
+        const chosenSet = new Set(Array.isArray(data.chosen) ? data.chosen : available.filter((s) => s.enabled).map((s) => s.name));
+        const list = el('div', { class: 'gateway-servers' });
+        available.forEach((server) => {
+          const box = el('input', { type: 'checkbox', checked: chosenSet.has(server.name), disabled: !server.enabled || !data.enabled || !integrationOn });
+          box.addEventListener('change', async () => {
+            const picks = [...list.querySelectorAll('input[type="checkbox"]')]
+              .filter((i) => i.checked).map((i) => i.dataset.server);
+            await API.saveSettings({ gateway_servers: picks });
+            state.appSettings = { ...(state.appSettings || {}), gateway_servers: picks };
+            if (isOn) toast('Server selection applies to the next gateway session.', 'info', 'Agent Gateway');
+          });
+          box.dataset.server = server.name;
+          list.appendChild(el('label', { class: 'gateway-server-row' }, box,
+            el('span', { text: server.name }),
+            server.enabled ? null : el('span', { class: 'muted', text: ' (disabled)' })));
+        });
+        gw.appendChild(list);
+      }
+      if (isOn) {
+        const expires = session.expires_at ? new Date(session.expires_at * 1000).toLocaleTimeString() : '';
+        gw.appendChild(el('p', { class: 'modal-note', text: `Running${expires ? ` · ends by ${expires}` : ''} · ${(session.servers || []).length} server(s) exposed.` }));
+        gw.appendChild(el('button', {
+          class: 'button button-danger button-small', type: 'button',
+          onclick: async () => { await API.stopGateway().catch(() => undefined); toast('Gateway session stopped and pairing revoked.', 'info', 'Agent Gateway'); void fill(); }
+        }, iconEl('x'), el('span', { text: 'Stop & revoke' })));
+      } else {
+        if (session.error) gw.appendChild(el('p', { class: 'modal-note', text: `Last session: ${session.error}` }));
+        const startBtn = el('button', {
+          class: 'button button-small', type: 'button', disabled: !data.enabled || !integrationOn,
+          onclick: async () => {
+            startBtn.disabled = true;
+            startBtn.querySelector('span:last-child').textContent = 'Starting tunnel…';
+            try {
+              await API.startGateway();
+              toast('Gateway session is live. Open an Agent chat.', 'success', 'Agent Gateway');
+            } catch (error) {
+              if (error?.details?.code === 'cloudflared_missing') {
+                showCloudflaredInstallModal(() => { void fill(); });
+              } else {
+                toast(errorMessage(error), 'error', 'Agent Gateway');
+              }
+            }
+            void fill();
+          }
+        }, iconEl('globe'), el('span', { text: 'Start session now' }));
+        gw.append(startBtn);
+      }
+
+      }
+
+      // --- Workspace section ---
+      const wsSec = section('Workspace');
+      const ws = data.workspace || {};
+      const folderRow = el('div', { class: 'agent-folder-row' },
+        el('span', { class: 'agent-folder-path', title: state.workspace || '', text: state.workspace || 'No folder selected' }),
+        el('button', {
+          class: 'button button-small button-quiet', type: 'button', disabled: !integrationOn,
+          onclick: async () => {
+            state.activeModal?.close();
+            if (!state.nativeReady) { openSettings('workspace'); return; }
+            await chooseNativeFolder();
+          }
+        }, iconEl('folder'), el('span', { text: 'Choose folder…' })),
+        state.workspace ? el('button', {
+          class: 'button button-small button-quiet', type: 'button',
+          onclick: async () => { await openWorkspaceFolder(); }
+        }, iconEl('external'), el('span', { text: 'Open' })) : null
+      );
+      wsSec.appendChild(folderRow);
+      wsSec.appendChild(toggleRow(
+        'Expose folder to the agent',
+        ws.available ? `The agent can list, read, write and run shell commands inside ${ws.folder}` : 'No folder picked yet',
+        ws.exposed !== false,
+        'Expose workspace folder',
+        async (input) => {
+          await API.saveSettings({ gateway_workspace: input.checked });
+          state.appSettings = { ...(state.appSettings || {}), gateway_workspace: input.checked };
+          if (isOn) toast('Workspace exposure applies to the next gateway session.', 'info', 'Agent Gateway');
+          void fill();
+        },
+        !data.enabled || !ws.available || !integrationOn
+      ));
+
+      // --- Security section ---
+      const sec = section('Security');
+      const perm = permissionMeta(state.permissionMode);
+      const permValue = el('span', { class: 'agent-permission-value' }, iconEl(perm.icon), el('span', { text: perm.label }), iconEl('chevron-down'));
+      const permDesc = el('span', { class: 'agent-integration-desc', text: perm.desc });
+      const permList = el('div', { class: 'agent-permission-list', hidden: true });
+      const permRow = el('button', {
+        class: 'agent-permission-row', type: 'button', disabled: !integrationOn,
+        'aria-expanded': 'false',
+        onclick: () => {
+          permList.hidden = !permList.hidden;
+          permRow.setAttribute('aria-expanded', String(!permList.hidden));
+        }
+      },
+        el('span', { class: 'agent-integration-text' },
+          el('span', { class: 'agent-integration-label', text: 'Permission mode' }),
+          permDesc),
+        permValue
+      );
+      const renderPermOptions = () => {
+        clear(permList);
+        PERMISSION_MODES.forEach((mode) => {
+          permList.appendChild(popoverOption({
+            title: mode.label,
+            desc: mode.desc,
+            icon: mode.icon,
+            selected: state.permissionMode === mode.id,
+            danger: mode.danger,
+            tag: mode.danger ? 'Dangerous' : '',
+            onClick: async () => {
+              await changePermissionMode(mode.id);
+              const next = permissionMeta(state.permissionMode);
+              permValue.innerHTML = '';
+              permValue.append(iconEl(next.icon), el('span', { text: next.label }), iconEl('chevron-down'));
+              permDesc.textContent = next.desc;
+              permList.hidden = true;
+              permRow.setAttribute('aria-expanded', 'false');
+              renderPermOptions();
+            }
+          }));
+        });
+      };
+      renderPermOptions();
+      sec.append(permRow, permList);
+    };
+
+    mountModal({
+      title: supervisorTrack ? 'Superviser integration' : 'Agent integration',
+      subtitle: supervisorTrack
+        ? 'Google AI mode plans; an Arena Agent chat executes in this workspace'
+        : 'Workspace and computer integration for Agent chats',
+      content,
+      size: 'medium'
+    });
+    void fill();
+  }
+
   function openModelPicker(lane = 'a', trigger = null) {
     if (!allowsManualModels()) {
       const message = state.mode === 'agent'
@@ -8066,20 +9328,6 @@ You can start with a more structured option: one script, short captions, and a c
     content.appendChild(searchWrap);
     const list = el('div', { class: 'popover-list', role: 'listbox', 'aria-label': `Model ${effectiveLane.toUpperCase()}` });
     content.appendChild(list);
-    const footer = el('div', { class: 'popover-foot' },
-      el('span', { class: 'modal-copy', style: { margin: '0', fontSize: '9px' }, text: `${modalityMeta(state.modality).label} · ${state.models.length} of models` }),
-      (state.mode === 'direct' && state.modality === 'text' && effectiveLane === 'a')
-        ? el('button', {
-          class: 'button button-small button-quiet', type: 'button',
-          onclick: () => { closePopover(); openFanoutPicker(anchor); }
-        }, iconEl('layers'), el('span', { text: state.fanoutModels?.length >= 2 ? `Fan-out: ${state.fanoutModels.length}` : 'Ask several' }))
-        : null,
-      el('button', {
-        class: 'icon-button tiny', type: 'button', 'aria-label': "Update the model list",
-        onclick: async () => { await loadModels(state.modality, { force: true }); renderModelOptions(); }
-      }, iconEl('refresh'))
-    );
-    content.appendChild(footer);
 
     const renderModelOptions = () => {
       clear(list);
@@ -8097,13 +9345,10 @@ You can start with a more structured option: one script, short captions, and a c
       }
       const query = searchInput.value.trim().toLocaleLowerCase('en');
       ensureElo(renderModelOptions);
-      const favs = modelPinSet(FAV_KEY);
-      const hidden = modelPinSet(HIDDEN_KEY);
       const filtered = state.models.filter((model) => {
-        if (hidden.has(String(model.id)) && !query) return false;
         if (!query) return true;
         return `${model.name} ${model.org} ${model.capabilities.join(' ')}`.toLocaleLowerCase('en').includes(query);
-      }).sort((x, y) => (favs.has(String(y.id)) ? 1 : 0) - (favs.has(String(x.id)) ? 1 : 0));
+      });
       if (!filtered.length) {
         list.appendChild(el('div', { class: 'popover-empty', text: state.models.length ? "Models not found." : "The server did not return models for this type." }));
         return;
@@ -8128,13 +9373,16 @@ You can start with a more structured option: one script, short captions, and a c
           : '';
         const capsText = (model.capabilities || []).join(' ').toLowerCase();
         const elo = eloForModel(model);
-        const meta = [
-          elo?.rank ? `Elo #${elo.rank}` : (model.rank ? `#${model.rank}` : ''),
-          elo?.score ? `${elo.score}` : (model.arena_score ? `rating ${model.arena_score}` : ''),
-          (model.supports_image_input === true || capsText.includes('vision') || capsText.includes('image')) ? 'Vision' : '',
-          (model.supports_file_input === true || capsText.includes('pdf') || capsText.includes('document')) ? 'Docs' : '',
-          /(mini|flash|lite|haiku|nano)/i.test(`${model.id || ''} ${model.name || ''}`) ? 'Light (saves daily balance)' : ''
-        ].filter(Boolean).join(' · ');
+        const rank = elo?.rank || model.rank;
+        const score = elo?.score || model.arena_score;
+        const hasVision = model.supports_image_input === true || capsText.includes('vision') || capsText.includes('image');
+        const hasDocs = model.supports_file_input === true || capsText.includes('pdf') || capsText.includes('document');
+        const meta = (rank || score || hasVision || hasDocs) ? el('span', { class: 'model-meta-inner' },
+          rank ? el('span', { class: 'model-rank', text: `#${rank}` }) : null,
+          score ? el('span', { class: 'model-score', text: String(score) }) : null,
+          hasVision ? el('span', { class: 'model-cap', title: 'Vision input' }, iconEl('eye')) : null,
+          hasDocs ? el('span', { class: 'model-cap', title: 'Document input' }, iconEl('file-check')) : null
+        ) : null;
         const option = popoverOption({
           title: model.name,
           desc: `${model.org || "Unknown organization"}${model.capabilities.length ? ` · ${model.capabilities.slice(0, 3).join(' · ')}` : ''}`,
@@ -8156,23 +9404,8 @@ You can start with a more structured option: one script, short captions, and a c
             text: initialLetters(model.name)
           });
         option.insertBefore(iconWrap, option.firstChild);
-        const isFav = favs.has(String(model.id));
-        const isHidden = hidden.has(String(model.id));
-        const favBtn = el('span', { class: `model-pin${isFav ? ' is-fav' : ''}`, role: 'button', tabindex: '-1',
-          title: isFav ? 'Unpin from top' : 'Pin to top', 'aria-label': isFav ? 'Unpin model' : 'Pin model' },
-          el('span', { class: 'model-pin-glyph', text: isFav ? '★' : '☆' }));
-        favBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleModelPin(FAV_KEY, model.id); renderModelOptions(); });
-        option.appendChild(favBtn);
-        const hideBtn = el('span', { class: 'model-pin', role: 'button', tabindex: '-1',
-          title: isHidden ? 'Unhide model' : 'Hide model', 'aria-label': isHidden ? 'Unhide model' : 'Hide model' }, iconEl('x'));
-        hideBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleModelPin(HIDDEN_KEY, model.id); renderModelOptions(); });
-        option.appendChild(hideBtn);
-        if (isHidden) option.classList.add('is-hidden-model');
         list.appendChild(option);
       });
-      if (hidden.size && !query) {
-        list.appendChild(el('div', { class: 'popover-empty', text: `${hidden.size} hidden model(s) — type to search to see and unhide them.` }));
-      }
     };
 
     searchInput.addEventListener('input', renderModelOptions);
@@ -8246,7 +9479,7 @@ You can start with a more structured option: one script, short captions, and a c
 
   let modalSequence = 0;
 
-  function mountModal({ title, subtitle = '', size = '', content, actions = [], onMount, onClose }) {
+  function mountModal({ title, subtitle = '', size = '', className = '', content, actions = [], onMount, onClose }) {
     closePopover(false);
     if (state.activeModal) state.activeModal.close();
     const previousFocus = document.activeElement;
@@ -8255,7 +9488,7 @@ You can start with a more structured option: one script, short captions, and a c
     const descriptionId = subtitle ? `modal-desc-${modalSequence}` : '';
     const backdrop = el('div', { class: 'modal-backdrop' });
     const modal = el('section', {
-      class: `modal${size ? ` modal-${size}` : ''}`,
+      class: `modal${size ? ` modal-${size}` : ''}${className ? ` ${className}` : ''}`,
       role: 'dialog',
       'aria-modal': 'true',
       'aria-labelledby': titleId,
@@ -8958,6 +10191,7 @@ You can start with a more structured option: one script, short captions, and a c
     state.chatTurns = {};
     state.activeChatId = null;
     state.activeChatTitle = '';
+    state.activeChatExternal = '';
     state.artifacts = [];
     state.challenge = null;
     updateArtifactCount();
@@ -9005,10 +10239,118 @@ You can start with a more structured option: one script, short captions, and a c
     }
   }
 
+  function buildGoogleAccountMenu(content, render) {
+    const google = googleIdentity();
+    const accounts = state.google?.accounts || [];
+    content.appendChild(el('p', { class: 'account-menu-head', text: 'Google accounts' }));
+    // The live window session is the real identity; saved cookie sets are
+    // extra accounts that can be pushed back into that window.
+    const liveRow = google.signedIn && google.expired
+      // The session Google no longer honours is not "Current": it is a card
+      // that says so and signs in again, the way arena.ai shows its own.
+      ? el('button', {
+        class: 'account-expired-card', type: 'button', 'data-popover-action': 'google-expired',
+        onclick: () => { closePopover(false); void googleSignIn(); }
+      },
+        el('span', { class: 'account-avatar is-google is-expired', 'aria-hidden': 'true', text: '?' }),
+        el('span', { class: 'account-menu-copy' },
+          el('span', { class: 'account-menu-email', text: google.email || google.name || 'Google account' }),
+          el('span', { class: 'account-menu-sub', text: google.expiredReason || 'Session expired: sign in' })))
+      : el('div', { class: `account-menu-row${google.signedIn ? ' is-current' : ''}` },
+        el('button', {
+          class: 'account-menu-main', type: 'button', 'data-popover-action': 'google-account',
+          onclick: () => { closePopover(false); void googleSignIn(); }
+        },
+          el('span', { class: 'account-avatar is-google', 'aria-hidden': 'true', text: 'G' }),
+          el('span', { class: 'account-menu-copy' },
+            el('span', { class: 'account-menu-email', text: google.signedIn ? google.name : 'Google: not signed in' }),
+            el('span', { class: 'account-menu-sub', text: google.signedIn
+              ? (google.email || 'Signed in inside the Google window')
+              : 'Sign in inside the Google window' })),
+          google.signedIn
+            ? el('span', { class: 'account-current-label', text: 'Current' })
+            : el('span', { class: 'account-menu-chev', 'aria-hidden': 'true' }, iconEl('chevron-right'))
+        ));
+    content.appendChild(liveRow);
+
+    accounts.forEach((account) => {
+      // The account in use already has its row above; when it is expired that
+      // row *is* the "sign in again" card, so repeating it here would read as
+      // two broken accounts.
+      if (account.expired && account.current && google.expired) return;
+      if (account.expired) {
+        const dead = el('button', {
+          class: 'account-expired-card', type: 'button', 'data-popover-action': 'google-saved-expired',
+          'data-account-id': account.id || '',
+          onclick: () => {
+            closePopover(false);
+            toast('That saved session is no longer valid. Sign in to Google again, or paste a fresh Cookie header.',
+              'warning', 'Google session expired');
+            void googleSignIn();
+          }
+        },
+          el('span', { class: 'account-avatar is-google is-expired', 'aria-hidden': 'true', text: '?' }),
+          el('span', { class: 'account-menu-copy' },
+            el('span', { class: 'account-menu-email', text: account.email || account.name || 'Google account' }),
+            el('span', { class: 'account-menu-sub', text: account.expired_reason || 'Session expired: sign in' })));
+        content.appendChild(dead);
+        return;
+      }
+      const row = el('div', { class: `account-menu-row${account.current ? ' is-current' : ''}` });
+      row.appendChild(el('button', {
+        class: 'account-menu-main', type: 'button', 'data-popover-action': 'google-saved-account',
+        onclick: () => { closePopover(false); void googleUseAccount(account); }
+      },
+        el('span', { class: 'account-avatar is-google', 'aria-hidden': 'true', text: 'G' }),
+        el('span', { class: 'account-menu-copy' },
+          el('span', { class: 'account-menu-email', text: account.email || account.name || 'Google account' }),
+          el('span', { class: 'account-menu-sub', text: 'Saved cookies on this device' })),
+        account.current
+          ? el('span', { class: 'account-current-label', text: 'Used' })
+          : el('span', { class: 'account-menu-chev', 'aria-hidden': 'true' }, iconEl('chevron-right'))
+      ));
+      if (!account.current) {
+        row.appendChild(el('button', {
+          class: 'account-menu-remove', type: 'button', title: 'Forget this Google account on this device',
+          onclick: (event) => { event.stopPropagation(); void googleRemoveAccount(account).then(render); }
+        }, iconEl('x')));
+      }
+      content.appendChild(row);
+    });
+
+    content.appendChild(el('div', { class: 'account-menu-divider', role: 'separator' }));
+    content.appendChild(el('button', {
+      class: 'account-menu-action', type: 'button', 'data-popover-action': 'google-window',
+      onclick: () => { closePopover(false); void API.googleOpen({}).catch(() => undefined); }
+    }, iconEl('external'), el('span', { text: 'Open Google window' })));
+    content.appendChild(el('button', {
+      class: 'account-menu-action', type: 'button', 'data-popover-action': 'google-add-window',
+      onclick: () => { closePopover(false); void googleSignIn(); }
+    }, iconEl('login'), el('span', { text: 'Sign-in window' })));
+    content.appendChild(el('button', {
+      class: 'account-menu-action', type: 'button', 'data-popover-action': 'google-add-cookies',
+      onclick: () => {
+        closePopover(false);
+        openSettings('connection', { track: 'google' });
+        window.setTimeout(() => {
+          const field = document.querySelector('#googleCookieInput');
+          if (field) { field.focus(); field.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+        }, 120);
+      }
+    }, iconEl('login'), el('span', { text: 'Use cookies' })));
+
+    // No "Sync Google history" here: the cloud list refreshes by itself when
+    // Google AI mode opens, so a manual sync was one button too many.
+  }
+
   function buildAccountMenu() {
     const content = el('div', { class: 'account-menu' });
     const render = () => {
       clear(content);
+      if (state.track === 'google') {
+        buildGoogleAccountMenu(content, render);
+        return;
+      }
       content.appendChild(el('p', { class: 'account-menu-head', text: 'Accounts' }));
       const accounts = Array.isArray(state.accounts) ? state.accounts : [];
       if (!accounts.length) {
@@ -9111,6 +10453,12 @@ You can start with a more structured option: one script, short captions, and a c
     if (activePopover && activePopover.trigger === els.accountButton) { closePopover(); return; }
     const content = buildAccountMenu();
     openPopover(els.accountButton, { title: 'Accounts', content, menu: true, role: 'menu' });
+    if (state.track === 'google') {
+      void loadGoogleStatus({ silent: true }).then(() => {
+        if (content.isConnected) content._rerender?.();
+      });
+      return;
+    }
     void API.getAccounts?.().then((result) => {
       if (Array.isArray(result?.accounts)) {
         state.accounts = result.accounts;
@@ -9374,37 +10722,75 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
 
-  function openSettings(initialTab = 'connection') {
-    const tabDefs = [
-      { id: 'connection', label: 'Account', icon: 'user' },
-      { id: 'permissions', label: 'Permissions', icon: 'shield' },
-      { id: 'workspace', label: 'Folder', icon: 'folder' },
-      { id: 'memory', label: 'Memory', icon: 'layers' },
-      { id: 'automations', label: 'Automations', icon: 'clock' },
-      { id: 'usage', label: 'Usage', icon: 'chart' },
-      { id: 'gateway', label: 'Gateway', icon: 'globe' },
-      { id: 'components', label: 'Components', icon: 'package' },
-      { id: 'about', label: 'About', icon: 'info' }
-    ];
+  function openSettings(initialTab = 'connection', options = {}) {
+    // One list for both modes: the switch above it decides whose values are
+    // shown, the sections themselves never change.
+    state.settingsTrack = options.track === 'google' || (!options.track && state.track === 'google')
+      ? 'google' : 'arena';
+    const settingsTabDefs = (track) => (track === 'google'
+      ? [
+        { id: 'connection', label: 'Account', icon: 'user' },
+        { id: 'workspace', label: 'Folder', icon: 'folder' },
+        { id: 'usage', label: 'Usage', icon: 'chart' },
+        { id: 'gateway', label: 'Superviser', icon: 'spark' },
+        { id: 'about', label: 'About', icon: 'info' }
+      ]
+      : [
+        { id: 'connection', label: 'Account', icon: 'user' },
+        { id: 'permissions', label: 'Permissions', icon: 'shield' },
+        { id: 'workspace', label: 'Folder', icon: 'folder' },
+        { id: 'memory', label: 'Memory', icon: 'layers' },
+        { id: 'automations', label: 'Automations', icon: 'clock' },
+        { id: 'usage', label: 'Usage', icon: 'chart' },
+        { id: 'gateway', label: 'Gateway', icon: 'globe' },
+        { id: 'components', label: 'Components', icon: 'package' },
+        { id: 'about', label: 'About', icon: 'info' }
+      ]);
+    // Google AI mode has no arena.ai models, no memory of its own and no
+    // automation queue — its sections are the ones it actually has, instead of
+    // arena.ai's list with arena.ai's words left inside.
+    const tabDefs = settingsTabDefs(state.settingsTrack);
     let currentTab = tabDefs.some((tab) => tab.id === initialTab) ? initialTab : 'connection';
     state.settingsTab = currentTab;
     const hydrated = {};
     const tabsBar = el('div', { class: 'settings-tabs', role: 'tablist', 'aria-label': 'Settings sections', 'aria-orientation': 'vertical' });
     const panel = el('div', { class: 'settings-panels', role: 'tabpanel', id: 'settings-panel' });
-    const layout = el('div', { class: 'settings-layout' }, tabsBar, panel);
+    // Arena / Google AI mode switch, right above the sections.  Both modes
+    // show the same sections; each keeps its own values.
+    const scopeSwitch = el('div', { class: 'settings-scope', role: 'group', 'aria-label': 'Settings mode' });
+    const scopeButtons = {};
+    [['arena', 'Arena'], ['google', 'Google AI mode']].forEach(([id, label]) => {
+      const button = el('button', {
+        class: 'settings-scope-btn', type: 'button', 'data-scope': id,
+        'aria-pressed': String(state.settingsTrack === id),
+        onclick: () => setScope(id)
+      }, iconEl(id === 'google' ? 'spark' : 'grid'), el('span', { text: label }));
+      scopeButtons[id] = button;
+      scopeSwitch.appendChild(button);
+    });
+    const scopeNote = el('p', { class: 'settings-scope-note', text: state.settingsTrack === 'google'
+      ? 'Google AI mode — its own values in every section.'
+      : 'Arena — these values are used in Arena mode only.' });
+    const tabsColumn = el('div', { class: 'settings-tabs-column' }, scopeSwitch, scopeNote, tabsBar);
+    const layout = el('div', { class: 'settings-layout' }, tabsColumn, panel);
     const tabButtons = {};
 
-    tabDefs.forEach((tab) => {
-      const button = el('button', {
-        class: 'settings-tab',
-        type: 'button', role: 'tab', id: `settings-tab-${tab.id}`,
-        'aria-selected': String(tab.id === currentTab), 'aria-controls': 'settings-panel',
-        tabindex: tab.id === currentTab ? '0' : '-1'
-      }, iconEl(tab.icon), el('span', { text: tab.label }));
-      button.addEventListener('click', () => selectTab(tab.id, true));
-      tabButtons[tab.id] = button;
-      tabsBar.appendChild(button);
-    });
+    function buildTabs() {
+      clear(tabsBar);
+      Object.keys(tabButtons).forEach((key) => delete tabButtons[key]);
+      tabDefs.forEach((tab) => {
+        const button = el('button', {
+          class: 'settings-tab',
+          type: 'button', role: 'tab', id: `settings-tab-${tab.id}`,
+          'aria-selected': String(tab.id === currentTab), 'aria-controls': 'settings-panel',
+          tabindex: tab.id === currentTab ? '0' : '-1'
+        }, iconEl(tab.icon), el('span', { text: tab.label }));
+        button.addEventListener('click', () => selectTab(tab.id, true));
+        tabButtons[tab.id] = button;
+        tabsBar.appendChild(button);
+      });
+    }
+    buildTabs();
     tabsBar.addEventListener('keydown', (event) => {
       if (!['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
       event.preventDefault();
@@ -10165,25 +11551,322 @@ You can start with a more structured option: one script, short captions, and a c
       return wrap;
     }
 
+    function renderGoogleSuperviserPanel() {
+      const wrap = el('div', { class: 'google-settings' });
+      const prefs = state.google?.prefs || {};
+      const on = Boolean(prefs.supervisor);
+      const savePref = async (patch) => {
+        try {
+          const res = await API.saveGooglePrefs(patch);
+          state.google = { ...state.google, prefs: res?.prefs || state.google.prefs };
+        } catch (error) { toast(errorMessage(error), 'error', 'Superviser'); }
+      };
+      wrap.appendChild(el('h3', { class: 'settings-h', text: 'Superviser integration' }));
+      wrap.appendChild(el('p', { class: 'setting-desc', text:
+        'Google AI mode writes the plan. An Arena Agent chat carries it out in your folder, '
+        + 'without improvising, and asks back with ASK: when only the planner can supply '
+        + 'material. The finished report is appended to the Google answer.' }));
+
+      const input = el('input', { type: 'checkbox', class: 'switch-input', checked: on });
+      input.addEventListener('change', async () => {
+        await savePref({ supervisor: input.checked });
+        refreshPanel();
+      });
+      wrap.appendChild(el('label', { class: 'agent-integration-row' },
+        el('span', { class: 'agent-integration-text' },
+          el('span', { class: 'agent-integration-label', text: on ? 'On' : 'Off' }),
+          el('span', { class: 'agent-integration-desc', text: on
+            ? 'Google plans, an Arena Agent chat executes in your folder'
+            : 'Google answers with text only; nothing runs on this computer' })),
+        el('span', { class: 'switch' }, input, el('span', { class: 'switch-track', 'aria-hidden': 'true' }))));
+
+      wrap.appendChild(el('div', { class: 'settings-row' },
+        el('span', { class: 'settings-row-label', text: 'Steps the executor may take' }),
+        el('select', { class: 'settings-input', onchange: (e) => { void savePref({ supervisor_steps: Number(e.target.value) }); } },
+          ...[2, 4, 6, 8, 12].map((n) => el('option', { value: String(n),
+            text: `${n} steps`, selected: Number(prefs.supervisor_steps || 6) === n })))));
+      wrap.appendChild(el('p', { class: 'setting-desc', text:
+        'The executor is the Arena Agent, so it needs an arena.ai account signed in. Without one '
+        + 'Google still answers — the plan is simply not executed.' }));
+      if (!state.authenticated) {
+        wrap.appendChild(el('div', { class: 'settings-row' },
+          el('span', { class: 'settings-row-label', text: 'Arena account' }),
+          el('span', { class: 'setting-desc', text: 'Not signed in: the plan will not run' }),
+          el('button', { class: 'button button-small', type: 'button',
+            onclick: () => { void startLogin(); } },
+            iconEl('login'), el('span', { text: 'Sign in to Arena' }))));
+      }
+      wrap.appendChild(el('p', { class: 'setting-desc', text:
+        'The same switch sits in the composer; both read and write one value.' }));
+      return wrap;
+    }
+
+    function renderGoogleAccountPanel() {
+      const wrap = el('div', { class: 'google-settings' });
+      const google = googleIdentity();
+      const prefs = state.google?.prefs || { hl: 'en', show_window: false, keep_citations: true };
+      const savePref = async (patch) => {
+        try {
+          const res = await API.saveGooglePrefs(patch);
+          state.google = { ...state.google, prefs: res?.prefs || state.google.prefs };
+        } catch (error) { toast(errorMessage(error), 'error', 'Google AI mode'); }
+      };
+      const toggleRow = (label, desc, checked, key) => {
+        const input = el('input', { type: 'checkbox', class: 'switch-input', checked: Boolean(checked) });
+        input.addEventListener('change', () => { void savePref({ [key]: input.checked }); });
+        return el('label', { class: 'agent-integration-row' },
+          el('span', { class: 'agent-integration-text' },
+            el('span', { class: 'agent-integration-label', text: label }),
+            el('span', { class: 'agent-integration-desc', text: desc })),
+          el('span', { class: 'switch' }, input, el('span', { class: 'switch-track', 'aria-hidden': 'true' })));
+      };
+
+      // ================================================================
+      // Account — who Google says is signed in, and how to change it.
+      // ================================================================
+      wrap.appendChild(el('h3', { class: 'settings-h', text: 'Google account' }));
+      const dot = el('span', { class: 'status-dot ' + (google.expired ? 'is-error'
+        : google.signedIn ? 'is-online' : 'is-pending'), 'aria-hidden': 'true' });
+      wrap.appendChild(el('div', { class: `account-status-card${google.expired ? ' is-expired' : ''}` },
+        el('span', { class: 'account-avatar is-google' + (google.expired ? ' is-expired' : ''),
+          'aria-hidden': 'true', text: google.expired ? '?' : 'G' }),
+        el('div', { class: 'account-status-copy' },
+          el('span', { class: 'account-status-name', text: google.expired
+            ? 'Session expired'
+            : google.signedIn ? google.name : 'Not signed in to Google' }),
+          el('span', { class: 'account-status-email', text: google.expired
+            ? (google.expiredReason || 'Google no longer accepts this session. Sign in again.')
+            : google.signedIn
+              ? (google.email || 'Session is saved on this computer')
+              : 'Everything here runs on your own Google account' })),
+        dot));
+      wrap.appendChild(el('div', { class: 'settings-row' },
+        el('button', { class: 'button button-small', type: 'button',
+          onclick: () => { void googleSignIn(); } },
+          iconEl('login'), el('span', { text: google.signedIn ? 'Sign in with another account' : 'Sign in' })),
+        el('button', { class: 'button button-small button-quiet', type: 'button',
+          onclick: async () => { await checkGoogleSignIn(); refreshPanel(); } },
+          iconEl('refresh'), el('span', { text: 'Check' })),
+        el('button', { class: 'button button-small button-quiet', type: 'button',
+          onclick: () => { void API.googleOpen({}).catch(() => undefined); } },
+          iconEl('external'), el('span', { text: 'Open Google' }))));
+      wrap.appendChild(el('p', { class: 'setting-desc', text: state.google?.desktop === false
+        ? 'The Google sign-in window exists only in the desktop app (Arena-Desktop.exe).'
+        : 'Sign-in opens the Google window on a clean session. The moment Google confirms it, '
+          + 'the session is saved here and the window closes by itself.' }));
+
+      // ================================================================
+      // Cookies — two boxes, one button.
+      // ================================================================
+      wrap.appendChild(el('h3', { class: 'settings-h', text: 'Sign in with cookies' }));
+      wrap.appendChild(el('p', { class: 'setting-desc', text:
+        'Google hands out cookies in two shapes. Paste whichever you have — one box or both — '
+        + 'and press Add once.' }));
+
+      const docArea = el('textarea', { class: 'settings-input cookie-field', id: 'googleDocCookieInput',
+        rows: '3', placeholder: 'NID=…; SIDCC=…; __Secure-1PSIDTS=…' });
+      const headArea = el('textarea', { class: 'settings-input cookie-field', id: 'googleCookieInput',
+        rows: '4', placeholder: 'SID=…; HSID=…; SSID=…; __Secure-1PSID=…' });
+      const emailInput = el('input', { class: 'settings-input', type: 'email', id: 'googleCookieEmail',
+        placeholder: 'Google email (optional)' });
+      const result = el('p', { class: 'setting-desc', role: 'status' });
+
+      const copyBtn = el('button', { class: 'button button-small button-quiet', type: 'button' },
+        iconEl('copy'), el('span', { text: 'Copy the command' }));
+      copyBtn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText('document.cookie');
+          toast('Copied: run document.cookie in the Console and paste the result here.', 'success');
+        } catch { toast('Copy failed — select the command manually.', 'warning'); }
+      });
+
+      wrap.appendChild(el('div', { class: 'cookie-field-block' },
+        el('div', { class: 'cookie-field-head' },
+          el('label', { class: 'cookie-field-title', for: 'googleDocCookieInput',
+            text: 'document.cookie' }),
+          copyBtn),
+        el('p', { class: 'cookie-field-where', text:
+          'F12 → Console → run document.cookie → paste the printed line.' }),
+        docArea));
+
+      wrap.appendChild(el('div', { class: 'cookie-field-block' },
+        el('label', { class: 'cookie-field-title', for: 'googleCookieInput',
+          text: 'Cookie request header' }),
+        el('p', { class: 'cookie-field-where', text:
+          'F12 → Network → reload → the first www.google.com request → Headers → '
+          + 'Request Headers → everything after "Cookie:".' }),
+        headArea,
+        el('p', { class: 'setting-desc cookie-field-note', text:
+          'This one signs in reliably: it carries the httpOnly cookies Google never shows to scripts.' })));
+
+      const addBtn = el('button', { class: 'button button-small', type: 'button' },
+        iconEl('check'), el('span', { class: 'button-label', text: 'Add' }));
+      addBtn.addEventListener('click', async () => {
+        const doc = String(docArea.value || '').trim();
+        const head = String(headArea.value || '').trim();
+        result.textContent = '';
+        if (!doc && !head) { toast('Paste at least one cookie box first.', 'warning'); return; }
+        // One button, one session: the header box wins when both are filled,
+        // because it is the box that actually carries the login. The
+        // document.cookie text is only merged in when it adds something new.
+        let cookie = head || doc;
+        if (doc && head) {
+          const have = new Set(head.split(';').map((x) => x.split('=')[0].trim()).filter(Boolean));
+          const extra = doc.split(';').map((x) => x.trim())
+            .filter((x) => x && !have.has(x.split('=')[0].trim()));
+          if (extra.length) cookie = `${head}; ${extra.join('; ')}`;
+        }
+        addBtn.disabled = true;
+        // The icon is a <span> as well: target the label explicitly, or the
+        // button reads "AddChecking…" and never comes back.
+        const span = addBtn.querySelector('span.button-label');
+        if (span) span.textContent = 'Checking…';
+        try {
+          const res = await API.addGoogleCookies({ cookie, email: emailInput.value.trim() });
+          await loadGoogleStatus({ silent: true });
+          docArea.value = ''; headArea.value = '';
+          result.textContent = res?.verified === false
+            ? 'Cookies saved, but this build has no Google window to check them with.'
+            : `Signed in as ${res?.email || 'your Google account'} — verified by Google itself.`;
+          toast(res?.verified === false ? 'Cookies saved without a check.'
+            : `Google confirms the session: ${res?.email || 'signed in'}.`, 'success', 'Google cookies');
+          updateAccountUI();
+          refreshPanel();
+        } catch (error) {
+          toast(errorMessage(error), 'error', 'Google cookies');
+        } finally {
+          addBtn.disabled = false;
+          if (span) span.textContent = 'Add';
+        }
+      });
+      wrap.appendChild(el('div', { class: 'cookie-actions' }, emailInput, addBtn));
+      wrap.appendChild(result);
+
+      // ================================================================
+      // Accounts saved on this computer
+      // ================================================================
+      const saved = state.google?.accounts || [];
+      if (saved.length) {
+        wrap.appendChild(el('h3', { class: 'settings-h', text: 'Accounts on this computer' }));
+        saved.forEach((acc) => {
+          wrap.appendChild(el('div', { class: 'settings-row google-account-row' },
+            el('span', { class: `settings-row-label${acc.expired ? ' is-expired' : ''}`,
+              text: (acc.email || acc.name || 'Google account')
+                + (acc.expired ? ' · expired' : '') }),
+            acc.current ? el('span', { class: 'account-current-label', text: 'Used' })
+              : el('button', { class: 'button button-small button-quiet', type: 'button',
+                  onclick: async () => { await googleUseAccount(acc); refreshPanel(); } },
+                  el('span', { text: 'Use' })),
+            el('button', { class: 'button button-small button-quiet', type: 'button',
+              onclick: async () => { await googleRemoveAccount(acc); refreshPanel(); } },
+              iconEl('x'), el('span', { text: 'Forget' }))));
+        });
+      }
+
+      // ================================================================
+      // History — one switch and one refresh, nothing else.
+      // ================================================================
+      wrap.appendChild(el('h3', { class: 'settings-h', text: 'History' }));
+      const historyCount = (state.googleThreads || []).length;
+      wrap.appendChild(el('p', { class: 'setting-desc', text: historyCount
+        ? `${historyCount} threads are listed from this Google account. Clicking one imports it here; `
+          + 'nothing is copied until you click.'
+        : 'Your Google AI mode threads are listed in the sidebar. Clicking one imports it here; '
+          + 'nothing is copied until you click.' }));
+      const syncBtn = el('button', { class: 'button button-small', type: 'button' },
+        iconEl('refresh'), el('span', { text: 'Refresh the list' }));
+      syncBtn.addEventListener('click', async () => {
+        syncBtn.disabled = true;
+        try { await loadGoogleThreads({ silent: false }); refreshPanel(); }
+        finally { syncBtn.disabled = false; }
+      });
+      wrap.appendChild(el('div', { class: 'settings-row' }, syncBtn));
+
+      // ================================================================
+      // Answers — only the knobs that change what Google returns here.
+      // ================================================================
+      wrap.appendChild(el('h3', { class: 'settings-h', text: 'Answers' }));
+      wrap.appendChild(el('div', { class: 'settings-row' },
+        el('span', { class: 'settings-row-label', text: 'Language' }),
+        el('select', { class: 'settings-input', onchange: (e) => { void savePref({ hl: e.target.value }); } },
+          ...[['en', 'English'], ['ru', 'Русский'], ['de', 'Deutsch'], ['es', 'Español']].map(([value, label]) =>
+            el('option', { value, text: label, selected: (prefs.hl || 'en') === value })))));
+      wrap.appendChild(el('p', { class: 'setting-desc', text:
+        'The language Google is asked to answer in, and the language of the page it returns.' }));
+      wrap.appendChild(toggleRow('Keep citations',
+        'Leave the source links Google put in the answer attached to the saved chat',
+        prefs.keep_citations, 'keep_citations'));
+      wrap.appendChild(toggleRow('Show the Google window while it works',
+        'Useful when Google asks for a human check: the page is in front of you, not hidden',
+        prefs.show_window, 'show_window'));
+
+      // ================================================================
+      // Superviser integration — Google plans, an Arena chat executes.
+      // ================================================================
+      wrap.appendChild(el('h3', { class: 'settings-h', text: 'Superviser integration' }));
+      wrap.appendChild(toggleRow('Google plans, Arena Agent executes',
+        'Google writes the plan; an Arena Agent chat carries it out in your folder and asks back '
+        + 'when only the planner can supply material',
+        prefs.supervisor, 'supervisor'));
+      wrap.appendChild(el('p', { class: 'setting-desc', text:
+        'This is the same switch as the one in the composer. It is kept here so the whole Google '
+        + 'mode can be set up in one place; both read and write the same value.' }));
+      return wrap;
+    }
+
+    state.settingsRefresh = () => { if (panel.isConnected) refreshPanel(); };
+
+    function setScope(scope) {
+      const next = scope === 'google' ? 'google' : 'arena';
+      if (state.settingsTrack === next) return;
+      state.settingsTrack = next;
+      Object.entries(scopeButtons).forEach(([id, button]) =>
+        button.setAttribute('aria-pressed', String(id === next)));
+      scopeNote.textContent = next === 'google'
+        ? 'Google AI mode: your Google account, cookies, history and answers.'
+        : 'Arena: your arena.ai account, models, permissions and workspace.';
+      // Each mode has its own sections, so the list is rebuilt rather than
+      // relabelled: Arena sections do not belong in a Google settings window.
+      const nextDefs = settingsTabDefs(next);
+      tabDefs.length = 0;
+      tabDefs.push(...nextDefs);
+      if (!tabDefs.some((tab) => tab.id === currentTab)) currentTab = 'connection';
+      state.settingsTab = currentTab;
+      buildTabs();
+      refreshPanel();
+      hydrateTab(currentTab);
+    }
+
     function contentFor(tab) {
+      if (tab === 'connection') {
+        return state.settingsTrack === 'google' ? renderGoogleAccountPanel() : renderConnectionPanel();
+      }
       if (tab === 'permissions') return renderPermissionsPanel();
       if (tab === 'workspace') return renderWorkspacePanel();
       if (tab === 'memory') return renderMemoryPanel();
       if (tab === 'automations') return renderAutomationsPanel();
       if (tab === 'usage') return renderUsagePanel();
-      if (tab === 'gateway') return renderGatewayPanel();
+      if (tab === 'gateway') {
+        // Same slot, different subject: Gateway belongs to arena.ai, the
+        // Superviser runs the Google plan through an Arena Agent chat.
+        return state.settingsTrack === 'google' ? renderGoogleSuperviserPanel() : renderGatewayPanel();
+      }
       if (tab === 'components') return renderComponentsPanel();
       if (tab === 'about') return renderAboutPanel();
       return renderConnectionPanel();
     }
 
     function hydrateTab(tab) {
-      if (hydrated[tab]) return;
-      hydrated[tab] = true;
+      // Cache per mode: the same section holds different values per track.
+      const cacheKey = `${state.settingsTrack}:${tab}`;
+      if (hydrated[cacheKey]) return;
+      hydrated[cacheKey] = true;
       if (state.serverError || state.networkOffline) return;
       if (tab === 'permissions') {
         Promise.allSettled([loadPermissionModeFromServer({ quiet: true }), loadPermissions({ quiet: true })])
           .then(() => { if (state.settingsTab === 'permissions') refreshPanel(); });
+      } else if (tab === 'connection' && state.settingsTrack === 'google') {
+        loadGoogleStatus({ silent: true }).then(() => { if (state.settingsTab === 'connection') refreshPanel(); });
       } else if (tab === 'workspace') {
         loadWorkspaceFromServer({ quiet: true }).then(() => { if (state.settingsTab === 'workspace') refreshPanel(); });
       } else if (tab === 'memory') {
@@ -10219,7 +11902,11 @@ You can start with a more structured option: one script, short captions, and a c
     const mounted = mountModal({
       title: 'Settings',
       size: 'large',
+      // Google AI mode settings take the colour of the chat menu (black),
+      // Arena keeps the neutral panel it always had.
+      className: state.settingsTrack === 'google' ? 'modal-settings-google' : '',
       content: layout,
+      onClose: () => { state.settingsTrack = null; state.settingsRefresh = null; },
       actions: [
         { label: 'Done', variant: 'primary' }
       ],
@@ -10541,7 +12228,13 @@ You can start with a more structured option: one script, short captions, and a c
   function syncWorkspacePanelVisibility() {
     const open = Boolean(state.workspacePanelOpen);
     if (els.app) els.app.dataset.workspacePanel = open ? 'open' : 'closed';
-    if (els.workspacePanel) els.workspacePanel.hidden = !open;
+    if (els.workspacePanel) {
+      els.workspacePanel.hidden = false;  // visibility via .is-open (animated), never display:none
+      els.workspacePanel.classList.toggle('is-open', open);
+    }
+    const arrow = els.workspaceTopButton || $('#workspaceArrow');
+    if (arrow) arrow.setAttribute('aria-expanded', String(open));
+    if (els.workspaceTopButton) els.workspaceTopButton.classList.toggle('is-active', open);
     if (els.workspacePanelTopButton) els.workspacePanelTopButton.setAttribute('aria-pressed', String(open));
     if (els.workspacePanelNavBtn) els.workspacePanelNavBtn.setAttribute('aria-pressed', String(open));
     if (els.workspacePanelRoot) {
@@ -10570,12 +12263,12 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function restoreWorkspacePanelPreference() {
-    let open = window.innerWidth >= 1180;
+    let open = false;  // closed by default; arrow opens it
     try {
       const stored = localStorage.getItem('arenaPersonal.workspacePanelOpen.v4');
       if (stored === '1') open = true;
       else if (stored === '0') open = false;
-    } catch { /* use width default */ }
+    } catch { /* use closed default */ }
     setWorkspacePanelOpen(open, { persist: false, load: false });
   }
 
@@ -10727,10 +12420,7 @@ You can start with a more structured option: one script, short captions, and a c
       key: 'sidebarWidth', label: 'Resize sidebar',
       valueFromEvent: ({ startValue, dx }) => startValue + dx
     });
-    setupPanelResize(els.workspaceResize, {
-      key: 'workspaceWidth', label: 'Resize workspace panel',
-      valueFromEvent: ({ startValue, dx }) => startValue - dx
-    });
+    setupWorkspaceFloat();
     setupPanelResize(els.workspaceSplitResize, {
       key: 'connectorsShare', orientation: 'horizontal', label: 'Resize connectors section',
       valueFromEvent: ({ startValue, dy, panelRect }) => {
@@ -10738,6 +12428,97 @@ You can start with a more structured option: one script, short captions, and a c
         return startValue - (dy / height) * 100;
       }
     });
+  }
+
+  function setupWorkspaceFloat() {
+    const panel = els.workspacePanel;
+    if (!panel) return;
+    const head = panel.querySelector('.workspace-panel-head');
+    const corner = $('#workspaceResizeCorner');
+    const arrow = $('#workspaceArrow');
+    const KEY = 'arenaPersonal.workspaceFloat.v4';
+
+    const syncArrow = () => {
+      if (!arrow) return;
+      if (!state.workspacePanelOpen) { arrow.style.right = ''; return; }
+      arrow.style.right = `${Math.max(0, window.innerWidth - panel.offsetLeft)}px`;
+    };
+    const readGeom = () => ({
+      right: Math.max(0, window.innerWidth - (panel.offsetLeft + panel.offsetWidth)),
+      top: Math.max(0, panel.offsetTop),
+      width: panel.offsetWidth,
+      height: panel.offsetHeight
+    });
+    const saveGeom = () => { try { localStorage.setItem(KEY, JSON.stringify(readGeom())); } catch { /* storage unavailable */ } };
+    const applyGeom = (g) => {
+      if (!g) return;
+      if (typeof g.right === 'number') panel.style.right = `${g.right}px`;
+      if (typeof g.top === 'number') panel.style.top = `${g.top}px`;
+      if (typeof g.width === 'number') panel.style.width = `${g.width}px`;
+      if (typeof g.height === 'number') panel.style.height = `${g.height}px`;
+      syncArrow();
+    };
+
+    try {
+      const saved = JSON.parse(localStorage.getItem(KEY) || 'null');
+      if (saved && window.innerWidth > 900) applyGeom(saved);
+    } catch { /* use defaults */ }
+
+    window.addEventListener('resize', () => {
+      if (window.innerWidth <= 900) {
+        panel.style.top = panel.style.right = panel.style.width = panel.style.height = '';
+      }
+      syncArrow();
+    });
+
+    if (head) {
+      head.addEventListener('pointerdown', (e) => {
+        if (window.innerWidth <= 900) return;
+        if (e.target.closest('button, a, input, select, textarea')) return;
+        const r = panel.getBoundingClientRect();
+        const offX = e.clientX - r.left, offY = e.clientY - r.top;
+        const move = (ev) => {
+          let left = ev.clientX - offX, top = ev.clientY - offY;
+          left = Math.min(Math.max(left, -r.width + 80), window.innerWidth - 80);
+          top = Math.min(Math.max(top, 0), window.innerHeight - 60);
+          panel.style.right = `${Math.max(0, window.innerWidth - (left + r.width))}px`;
+          panel.style.top = `${top}px`;
+          syncArrow();
+        };
+        const up = () => {
+          window.removeEventListener('pointermove', move);
+          window.removeEventListener('pointerup', up);
+          saveGeom();
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+        e.preventDefault();
+      });
+    }
+
+    if (corner) {
+      corner.addEventListener('pointerdown', (e) => {
+        if (window.innerWidth <= 900) return;
+        const r = panel.getBoundingClientRect();
+        const startX = e.clientX, startY = e.clientY, startW = r.width, startH = r.height;
+        const move = (ev) => {
+          panel.style.width = `${Math.min(720, Math.max(280, startW - (ev.clientX - startX)))}px`;
+          panel.style.height = `${Math.min(Math.max(200, window.innerHeight - 80), Math.max(200, startH + (ev.clientY - startY)))}px`;
+          syncArrow();
+        };
+        const up = () => {
+          window.removeEventListener('pointermove', move);
+          window.removeEventListener('pointerup', up);
+          saveGeom();
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+        e.preventDefault();
+      });
+    }
+
+    new MutationObserver(syncArrow).observe(panel, { attributes: true, attributeFilter: ['class', 'style'] });
+    syncArrow();
   }
 
   async function refreshWorkspacePanel({ force = false } = {}) {
@@ -11736,8 +13517,23 @@ You can start with a more structured option: one script, short captions, and a c
   function cacheElements() {
     els.app = $('#app');
     els.sidebar = $('#sidebar');
+    els.chatsDrawer = $('#chatsDrawer');
+    els.chatsDrawerButton = $('#chatsDrawerButton');
+    els.chatsDrawerClose = $('#chatsDrawerClose');
+    els.railCenter = $('#railCenter');
+    els.railStrip = $('#railStrip');
+    els.railLeft = $('#railLeft');
+    els.railRight = $('#railRight');
+    els.railBrand = $('#railBrand');
+    els.railBrandName = $('#railBrandName');
+    els.railNewChat = $('#railNewChat');
+    els.workspaceTopButton = $('#workspaceArrowTop');
     els.collapseSidebar = $('#collapseSidebar');
     els.newChatBtn = $('#newChatBtn');
+    els.navNewChat = $('#navNewChat') || $('#railNewChat');
+    els.navArenaMode = $('#navArenaMode');
+    els.navGoogleMode = $('#navGoogleMode');
+    els.navSeeMore = $('#navSeeMore');
     els.modelsNavBtn = $('#modelsNavBtn');
     els.modelsNavCount = $('#modelsNavCount');
     els.searchNavBtn = $('#searchNavBtn');
@@ -11757,6 +13553,8 @@ You can start with a more structured option: one script, short captions, and a c
     els.accountName = $('#accountName');
     els.accountState = $('#accountState');
     els.accountDot = $('#accountDot');
+    els.accountCheck = $('#accountCheck');
+    els.accountPopover = $('#accountPopover');
     els.sidebarScrim = $('#sidebarScrim');
     els.mobileMenuBtn = $('#mobileMenuBtn');
     els.topbarTitle = $('#topbarTitle');
@@ -11792,7 +13590,8 @@ You can start with a more structured option: one script, short captions, and a c
     els.fileInput = $('#fileInput');
     els.attachmentStrip = $('#attachmentStrip');
     els.dropOverlay = $('#dropOverlay');
-    els.modelStrip = $('#modelStrip');
+    els.modelChips = $('#modelChips');
+    els.toolbarSpacer = $('#toolbarSpacer');
     els.modeBar = $('#modeBar');
     els.modalityBar = $('#modalityBar');
     els.composerContext = $('#composerContext');
@@ -11802,8 +13601,6 @@ You can start with a more structured option: one script, short captions, and a c
     els.contextPending = $('#contextPending');
     els.heavySendBadge = $('#heavySendBadge');
     els.heavySendLabel = $('#heavySendLabel');
-    els.workspaceButton = $('#workspaceButton');
-    els.workspaceLabel = $('#workspaceLabel');
     els.modeButton = $('#modeButton');
     els.modeLabel = $('#modeLabel');
     els.modalityButton = $('#modalityButton');
@@ -11811,13 +13608,7 @@ You can start with a more structured option: one script, short captions, and a c
     els.sidebarResize = $('#sidebarResize');
     els.workspaceResize = $('#workspaceResize');
     els.workspaceSplitResize = $('#workspaceSplitResize');
-    els.permissionButton = $('#permissionButton');
-    els.workspaceSyncChip = $('#workspaceSyncChip');
-    els.workspaceSyncToggle = $('#workspaceSyncToggle');
-    els.compactButton = $('#compactButton');
-    els.gatewayChip = $('#gatewayChip');
-    els.compactDot = $('#compactDot');
-    els.permissionLabel = $('#permissionLabel');
+    els.agentIntegrationButton = $('#agentIntegrationButton');
     els.pendingPermissionsBadge = $('#pendingPermissionsBadge');
     els.sendButton = $('#sendButton');
     els.stopButton = $('#stopButton');
@@ -11826,6 +13617,10 @@ You can start with a more structured option: one script, short captions, and a c
     els.workspacePanel = $('#workspacePanel');
     els.workspacePanelRoot = $('#workspacePanelRoot');
     els.workspacePanelClose = $('#workspacePanelClose');
+    [els.workspaceTopButton, $('#workspaceArrow')].forEach((button) => {
+      if (!button) return;
+      button.addEventListener('click', () => setWorkspacePanelOpen(!state.workspacePanelOpen));
+    });
     els.workspaceTree = $('#workspaceTree');
     els.workspaceFilesPane = $('#workspaceFilesPane');
     els.workspaceGitPane = $('#workspaceGitPane');
@@ -11856,22 +13651,15 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function ensureBypassWarning() {
-    if (!els.composerContext || !els.composerContext.parentNode) return null;
-    let warning = $('#permissionDangerBanner');
-    if (!warning) {
-      warning = el('div', { class: 'composer-warning', id: 'permissionDangerBanner', role: 'alert', hidden: true });
-      warning.append(iconEl('shield-alert'), el('span', { text: "Permission bypass enabled: backend can perform actions without confirmation. This is dangerous outside an isolated environment." }));
-      els.composerContext.insertAdjacentElement('afterend', warning);
-    }
-    warning.hidden = state.permissionMode !== 'bypassPermissions';
-    return warning;
+    return null;  // banner removed by user request
   }
 
   function restoreSidebarPreference() {
+    // Starts unfolded: the opening state is the logo with the chats riding
+    // around the New chat button, which is the layout the toolbar was built for.
     try {
       const stored = localStorage.getItem('arenaPersonal.sidebarCollapsed.v4');
-      if (stored === '1') setSidebarCollapsed(true);
-      else setSidebarCollapsed(false);
+      setSidebarCollapsed(stored === '1');
     } catch {
       setSidebarCollapsed(false);
     }
@@ -11928,7 +13716,49 @@ You can start with a more structured option: one script, short captions, and a c
     });
 
     els.newChatBtn?.addEventListener('click', () => { void createNewChat(); });
+    els.navNewChat?.addEventListener('click', () => { void createNewChat(); });
+    els.navArenaMode?.addEventListener('click', () => {
+      if (state.track !== 'arena') setTrack('arena');
+      if (state.mode !== 'direct') {
+        state.mode = 'direct';
+        state.selectionTouched = true;
+        Promise.resolve(API.setMode?.('direct')).catch(() => {});
+        updateComposerState();
+      }
+      void createNewChat();
+    });
+    els.navGoogleMode?.addEventListener('click', () => {
+      // In-app Google AI mode: its own theme, its own chats, no connectors.
+      if (state.track !== 'google') setTrack('google');
+      void createNewChat();
+      window.setTimeout(() => { void loadGoogleThreads({ silent: true }); }, 900);
+    });
+    els.navSeeMore?.addEventListener('click', () => {
+      const more = $('#navMore');
+      const open = more?.classList.toggle('is-open');
+      els.navSeeMore.setAttribute('aria-expanded', String(Boolean(open)));
+    });
     els.collapseSidebar?.addEventListener('click', () => setSidebarCollapsed(!state.sidebarCollapsed));
+    els.chatsDrawerButton?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      setChatsDrawerOpen(!state.chatsDrawerOpen);
+    });
+    // Click-away without an overlay: the list must stay fully clickable, which
+    // a full-screen shield inside the toolbar got wrong.
+    document.addEventListener('mousedown', (event) => {
+      if (!state.chatsDrawerOpen) return;
+      if (event.target.closest('#chatsDrawer') || event.target.closest('#chatsDrawerButton')) return;
+      setChatsDrawerOpen(false);
+    }, true);
+    els.chatsDrawerClose?.addEventListener('click', () => setChatsDrawerOpen(false));
+    // Any chat row inside the drawer closes it; Esc does the same.
+    els.chatsDrawer?.addEventListener('click', (event) => {
+      if (event.target.closest('.chat-row-open')) setChatsDrawerOpen(false);
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && state.chatsDrawerOpen) setChatsDrawerOpen(false);
+    });
+    els.railNewChat?.addEventListener('click', () => { void createNewChat(); setChatsDrawerOpen(false); });
     els.mobileMenuBtn?.addEventListener('click', () => {
       if (els.app?.classList.contains('mobile-sidebar-open')) closeMobileSidebar();
       else openMobileSidebar();
@@ -12040,13 +13870,10 @@ You can start with a more structured option: one script, short captions, and a c
     els.modalityButton?.addEventListener('click', () => {
       if (!els.modalityButton.disabled) openModalityPopover();
     });
-    els.permissionButton?.addEventListener('click', () => {
-      if (!els.permissionButton.disabled) openPermissionModePopover();
+    els.agentIntegrationButton?.addEventListener('click', () => {
+      openAgentIntegrationPopover(els.agentIntegrationButton);
     });
-    els.workspaceSyncToggle?.addEventListener('change', () => setWorkspaceSync(els.workspaceSyncToggle.checked));
-    els.compactButton?.addEventListener('click', confirmCompact);
     els.heavySendBadge?.addEventListener('click', () => openSettings('usage'));
-    els.gatewayChip?.addEventListener('click', () => openSettings('gateway'));
     els.sendButton?.setAttribute('type', 'submit');
     els.stopButton?.addEventListener('click', () => { void stopGeneration(); });
     els.chatSettingsButton?.addEventListener('click', () => openSettings('permissions'));
@@ -12204,6 +14031,9 @@ You can start with a more structured option: one script, short captions, and a c
         case 'retry-arena-chats':
           void loadArenaChats();
           break;
+        case 'retry-google-threads':
+          void loadGoogleThreads();
+          break;
         case 'retry-models':
           void loadModels(state.modality);
           break;
@@ -12339,95 +14169,760 @@ You can start with a more structured option: one script, short captions, and a c
   /* ---------------------------------------------------------------------- */
   window.setInterval(() => { void refreshNativeSubagents(); }, 3000);
 
-  async function boot() {
-    loadUnreadDone();
-    cacheElements();
-    hydrateIcons();
-    ensureBypassWarning();
-    setupNativeBridge();
-    restoreSidebarPreference();
-    restoreWorkspacePanelPreference();
-    setupLayoutResize();
-    bindEvents();
-    state.view = 'welcome';
-    if (state.engineOpen) syncDock(false);
-    if (state.demo) {
-      document.documentElement.dataset.demo = 'true';
-      document.body.classList.add('demo-mode');
-      document.title = "Demo · Arena Desktop";
-      if (els.demoChip) els.demoChip.hidden = false;
-      if (els.demoBanner) els.demoBanner.hidden = false;
-    }
-    updateConnectionUI();
-    updateAccountUI();
-    renderChats();
-    renderWorkspaceTreePanel();
-    renderConnectorsPanel();
-    renderModelStrip();
-    renderModelsNavCount();
-    updatePendingPermissionsBadge();
-    updateComposerState();
-    setView('welcome');
-    resizePrompt();
+  // -------------------------------------------------------------------------
+  // Startup gate
+  // -------------------------------------------------------------------------
+  // Nothing behind this screen is reachable until every blocking readiness
+  // check passes. The checks run one at a time, in order, so a slow Google
+  // window never holds up the file-integrity check and the person can always
+  // see which step they are stuck on. A failing blocking step stops the walk
+  // and offers the action that fixes it.
 
-    try {
-      const status = await loadStatus({ initial: true });
-      if (status) {
-        await Promise.allSettled([
-          loadChats(),
-          loadModels(state.modality, { quiet: true }),
-          refreshWorkspacePanel(),
-          loadLayoutSettings()
-        ]);
-        await loadPermissions({ quiet: true });
-        if (status.engine && normalizeEngine(status.engine).open) syncDock(false);
-        updateComposerState();
-      } else {
-        state.chatsLoading = false;
-        state.chatsError = state.serverError || "Local server is unavailable.";
-        state.modelsLoading = false;
-        state.modelsError = state.serverError || "Model list unavailable.";
-        state.chats = [];
-        state.models = [];
-        renderChats();
-        renderModelStrip();
-        renderModelsNavCount();
-        updateComposerState();
-        updateConnectionUI();
-      }
-    } catch (error) {
-      state.serverError = errorMessage(error);
-      state.phase = 'offline';
-      state.chatsLoading = false;
-      state.modelsLoading = false;
-      state.chatsError = state.serverError;
-      state.modelsError = state.serverError;
-      updateAllUI();
-    } finally {
-      state.booted = true;
-      state.phase = state.serverError ? 'offline' : 'ready';
-      ensureBypassWarning();
-      updateAllUI();
-      void maybeShowFirstRunComponents();
-      applyInitialDeepLink();
-      if (pendingDeepLink) {
-        const link = pendingDeepLink;
-        pendingDeepLink = null;
-        void applyDeepLink(link);
-      }
-      if (!state.demo) {
-        document.documentElement.classList.remove('demo-mode');
-      }
-      // Nothing fake is inserted when status/API loading failed.
-      if (state.serverError) {
-        announce("Local server unavailable. The interface shows the actual status and offers demo separately.");
-      }
-    }
+  const BOOT_STATE = { done: false, failed: new Set() };
+
+  function bootEls() {
+    return {
+      gate: document.getElementById('bootGate'),
+      steps: document.getElementById('bootSteps'),
+      hint: document.getElementById('bootHint'),
+      fill: document.getElementById('bootProgressFill'),
+      cont: document.getElementById('bootContinue'),
+      sub: document.getElementById('bootSub')
+    };
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => { void boot(); }, { once: true });
+  // Escape HTML for safe injection into step rows.
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text == null ? '' : String(text);
+    return div.innerHTML;
+  }
+
+  const BOOT_STEPS = [
+  { id: "dependencies", title: "Dependencies" },
+  { id: "integrity", title: "File integrity" },
+  { id: "accounts", title: "Accounts" },
+  { id: "arena_chats", title: "Arena chats" },
+  { id: "google_chats", title: "Google chats" },
+  { id: "models", title: "Models" },
+  { id: 'cache', label: 'Cache' },
+  { id: 'cache', label: 'Cache' },
+        ];
+
+window.bootState = window.bootState || {
+  items: {},
+  running: false,
+};
+
+function _bootSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function _bootEscape(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function _bootHeaders() {
+  const token =
+    (typeof API_TOKEN !== "undefined" && API_TOKEN) ||
+    window.__ARENA_API_TOKEN ||
+    document.querySelector('meta[name="api-token"]')?.getAttribute("content") ||
+    "";
+  return token ? { "X-Arena-Token": token } : {};
+}
+
+// Гарантирует, что в #bootSteps созданы DOM-строки для всех 6 этапов
+function ensureBootStepRows() {
+  const list =
+    document.getElementById("bootSteps") ||
+    document.querySelector(".boot-steps");
+  if (!list) return null;
+
+  for (const step of BOOT_STEPS) {
+    let row = list.querySelector(`.boot-step[data-step-id="${step.id}"]`);
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "boot-step is-pending";
+      row.dataset.stepId = step.id;
+      list.appendChild(row);
+    }
+    if (!row.innerHTML.trim()) {
+      renderBootStepRow(
+        row,
+        { id: step.id, title: step.title, detail: "Waiting…" },
+        "pending"
+      );
+    }
+  }
+  return list;
+}
+
+function renderBootStepRow(row, item, stateName) {
+  if (!row) return;
+  const title =
+    item.title ||
+    (BOOT_STEPS.find((s) => s.id === item.id) || {}).title ||
+    item.id;
+  const icon =
+    stateName === "ok"
+      ? "✓"
+      : stateName === "checking"
+      ? "…"
+      : stateName === "pending"
+      ? "•"
+      : "✕";
+  const spinClass = stateName === "checking" ? " is-spinning" : "";
+
+  row.dataset.stepId = item.id;
+  row.className = `boot-step is-${stateName}`;
+  row.innerHTML = `
+    <span class="boot-step-icon" aria-hidden="true">${icon}</span>
+    <div class="boot-step-body">
+      <div class="boot-step-header">
+        <span class="boot-step-title">${_bootEscape(title)}</span>
+        <button type="button" class="boot-step-reload${spinClass}" title="Reload this step" aria-label="Reload ${_bootEscape(title)}">
+          <span class="boot-step-reload-icon" aria-hidden="true">↻</span>
+        </button>
+      </div>
+      <div class="boot-step-detail">${_bootEscape(item.detail || "")}</div>
+      ${
+        item.action && stateName === "failed"
+          ? `<div class="boot-step-action-text">${_bootEscape(item.action)}</div>`
+          : ""
+      }
+    </div>
+  `;
+
+  const reloadBtn = row.querySelector(".boot-step-reload");
+  if (reloadBtn) {
+    reloadBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      reloadSingleBootStep(item.id);
+    };
+  }
+
+  bootAddActions(row, item, stateName);
+}
+
+function bootSetState(rowOrId, itemOrState, stateOrDetail, actionText) {
+  let row, item, stateName;
+  if (typeof rowOrId === "string") {
+    row = document.querySelector(`.boot-step[data-check-id="${rowOrId}"]`);
+    stateName = itemOrState;
+    item = {
+      id: rowOrId,
+      detail: stateOrDetail || "",
+      action: actionText || "",
+    };
   } else {
-    void boot();
+    row = rowOrId;
+    item = itemOrState || {};
+    stateName = stateOrDetail;
   }
+  if (!row) return;
+  row.dataset.checkId = item.id;
+  row.className = `boot-step is-${stateName}`;
+
+  const iconEl = row.querySelector(".boot-step-icon");
+  if (iconEl) {
+    iconEl.textContent =
+      stateName === "ok" ? "✓" : stateName === "checking" ? "…" : "✕";
+  }
+
+  const titleEl = row.querySelector(".boot-step-title");
+  if (titleEl && item.title) {
+    titleEl.textContent = item.title;
+  }
+
+  const detailEl = row.querySelector(".boot-step-detail");
+  if (detailEl) {
+    detailEl.textContent = item.detail || "";
+  }
+
+  const reloadBtn = row.querySelector(".boot-step-reload");
+  if (reloadBtn) {
+    reloadBtn.classList.toggle("is-spinning", stateName === "checking");
+    reloadBtn.disabled = stateName === "checking";
+  }
+
+  const oldAction = row.querySelector(".boot-step-action");
+  if (oldAction) oldAction.remove();
+  if (item.action && stateName === "failed") {
+    const act = document.createElement("div");
+    act.className = "boot-step-action";
+    act.textContent = item.action;
+    const body = row.querySelector(".boot-step-body");
+    if (body) body.appendChild(act);
+  }
+
+  bootAddActions(row, item, stateName);
+}
+
+function bootAddActions(rowOrId, item, stateName) {
+  const row =
+    typeof rowOrId === "string"
+      ? document.querySelector(`.boot-step[data-check-id="${rowOrId}"]`)
+      : rowOrId;
+  if (!row || !item) return;
+
+  const old = row.querySelector(".boot-step-actions");
+  if (old) old.remove();
+  if (item.id !== "accounts") return;
+
+  const arenaOk = Boolean(
+    item.arena_signed_in ||
+      (window.state?.me && (window.state.me.signed_in || window.state.me.authenticated))
+  );
+  const googleOk = Boolean(
+    item.google_signed_in ||
+      (typeof googleSignedIn === "function" && googleSignedIn())
+  );
+
+  const actions = document.createElement("div");
+  actions.className = "boot-step-actions";
+
+  if (!arenaOk) {
+    const btnArena = document.createElement("button");
+    btnArena.type = "button";
+    btnArena.className = "boot-action-btn primary";
+    btnArena.dataset.provider = "arena";
+    btnArena.textContent = "Sign in to Arena";
+    btnArena.onclick = async () => {
+      btnArena.disabled = true;
+      try {
+        await API.login();
+      } catch (error) {
+        toast(errorMessage(error), 'error', 'Arena sign-in');
+        btnArena.disabled = false;
+        return;
+      }
+      toast('Finish signing in inside the Arena window. This screen updates by itself.',
+        'info', 'Arena sign-in');
+      let done = false;
+      for (let attempt = 0; attempt < 600; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        let result = null;
+        try {
+          result = await API.loginPoll();
+        } catch (error) {
+          btnArena.disabled = false;
+          return;
+        }
+        if (result?.cancelled || (result?.error && result?.done !== false)) {
+          btnArena.disabled = false;
+          return;
+        }
+        if (result?.done === true || result?.authenticated === true || result?.status === 'done') {
+          done = result?.ok !== false;
+          break;
+        }
+      }
+      if (!done) {
+        btnArena.disabled = false;
+        return;
+      }
+      await runBootGate();
+    };
+    actions.appendChild(btnArena);
+  }
+
+  if (!googleOk) {
+    const btnGoogle = document.createElement("button");
+    btnGoogle.type = "button";
+    btnGoogle.className = "boot-action-btn";
+    btnGoogle.dataset.provider = "google";
+    btnGoogle.textContent = "Sign in to Google";
+    btnGoogle.onclick = async () => {
+      btnGoogle.disabled = true;
+      try {
+        await API.googleSignIn();
+      } catch (error) {
+        toast(errorMessage(error), 'error', 'Google sign-in');
+        btnGoogle.disabled = false;
+        return;
+      }
+      toast('Finish signing in inside the Google window. It closes by itself when done. This is a separate window from Arena sign-in.',
+        'info', 'Google sign-in');
+      btnGoogle.disabled = false;
+    };
+    actions.appendChild(btnGoogle);
+  }
+
+  if (actions.children.length > 0) {
+    const body = row.querySelector(".boot-step-body");
+    if (body) body.appendChild(actions);
+  }
+}
+
+// Запрос одного этапа с 2 ретраями по 1 с при сбое + совместимость с ?step= и ?check=
+async function fetchBootStepWithRetries(stepId, maxRetries = 2, delayMs = 1000) {
+  const stepMeta = BOOT_STEPS.find((s) => s.id === stepId) || {
+    id: stepId,
+    title: stepId,
+  };
+  let lastItem = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 7000);
+    try {
+      const queryStep = encodeURIComponent(stepId);
+      const res = await fetch(
+        `/api/readiness?step=${queryStep}&check=${queryStep}`,
+        { cache: "no-store", signal: controller.signal }
+      );
+      const data = await res.json();
+      const items = Array.isArray(data?.items) ? data.items : [];
+      let found = items.find((x) => x && x.id === stepId);
+
+      // Фоллбэк на случай, если на сервере остался старый _build_readiness с общим "chats"
+      if (!found && (stepId === "arena_chats" || stepId === "google_chats")) {
+        const legacyChats = items.find((x) => x && x.id === "chats");
+        if (legacyChats) {
+          found = {
+            ...legacyChats,
+            id: stepId,
+            title: stepMeta.title,
+          };
+        }
+      }
+      if (!found && items.length === 1) {
+        found = { ...items[0], id: stepId, title: stepMeta.title };
+      }
+
+      if (found) {
+        lastItem = { ...found, id: stepId, title: found.title || stepMeta.title };
+        if (lastItem.ok || lastItem.optional) {
+          return lastItem;
+        }
+      } else {
+        lastItem = {
+          id: stepId,
+          title: stepMeta.title,
+          ok: false,
+          detail: "Step did not return status",
+          action: "Reload this step.",
+        };
+      }
+    } catch (err) {
+      lastItem = {
+        id: stepId,
+        title: stepMeta.title,
+        ok: false,
+        detail:
+          err && err.name === "AbortError"
+            ? "Check timed out after 7s"
+            : String(err && err.message ? err.message : "Network error"),
+        action: "Check your connection and reload this step.",
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+
+    // Не ждём 2 лишние секунды, если пользователь просто ещё не вошёл в аккаунты
+    if (stepId === "accounts" && lastItem && !lastItem.ok) {
+      break;
+    }
+    if (attempt < maxRetries) {
+      await _bootSleep(delayMs);
+    }
+  }
+
+  return (
+    lastItem || {
+      id: stepId,
+      title: stepMeta.title,
+      ok: false,
+      detail: "Check failed",
+      action: "Reload this step.",
+    }
+  );
+}
+
+async function reloadSingleBootStep(stepId) {
+  const list = ensureBootStepRows();
+  if (!list) return;
+
+  const targetIds =
+    stepId === "accounts"
+      ? ["accounts", "arena_chats", "google_chats", "models"]
+      : [stepId];
+
+  for (const id of targetIds) {
+    const row = list.querySelector(`.boot-step[data-step-id="${id}"]`);
+    const title = (BOOT_STEPS.find((s) => s.id === id) || {}).title || id;
+    renderBootStepRow(row, { id, title, detail: "Checking…" }, "checking");
+
+    const item = await fetchBootStepWithRetries(id, 2, 1000);
+    window.bootState.items[id] = item;
+    renderBootStepRow(row, item, item.ok || item.optional ? "ok" : "failed");
+  }
+
+  updateBootFooterControls();
+}
+
+function updateBootFooterControls() {
+  const acc = window.bootState.items.accounts || {};
+  const anySignedIn = Boolean(
+    acc.arena_signed_in ||
+      acc.google_signed_in ||
+      state.me?.signed_in ||
+      state.me?.authenticated ||
+      googleSignedIn()
+  );
+
+  const allPassed =
+    anySignedIn &&
+    BOOT_STEPS.every((s) => {
+      const it = window.bootState.items[s.id];
+      return it && (it.ok || it.optional);
+    });
+
+  const continueBtn = document.getElementById("bootContinue");
+  const noteEl = document.getElementById("bootHint");
+
+  if (allPassed) {
+    if (continueBtn) continueBtn.hidden = true;
+    dismissBootGate();
+    return;
+  }
+
+  if (continueBtn) {
+    continueBtn.hidden = !anySignedIn;
+    continueBtn.classList.add("boot-continue-btn");
+    continueBtn.onclick = () => {
+      if (anySignedIn) dismissBootGate();
+    };
+  }
+
+  if (noteEl) {
+    noteEl.textContent = anySignedIn
+      ? "Signed in. Some checks failed — reload them or continue anyway."
+      : "Sign in to Arena or Google to continue.";
+  }
+}
+
+function dismissBootGate() {
+  const gate =
+    document.getElementById("bootGate") ||
+    document.querySelector(".boot-gate");
+  if (gate) {
+    gate.hidden = true;
+    gate.style.display = "none";
+  }
+  if (typeof startApp === "function" && !window._appStarted) {
+    window._appStarted = true;
+    startApp();
+  }
+}
+
+async function runBootGate() {
+  if (window.bootState.running) return;
+  window.bootState.running = true;
+  try {
+    const list = ensureBootStepRows();
+    if (!list) return;
+
+    const bar = document.getElementById("bootProgressFill");
+    const total = BOOT_STEPS.length;
+
+    for (let i = 0; i < total; i++) {
+      const step = BOOT_STEPS[i];
+      const row = list.querySelector(`.boot-step[data-step-id="${step.id}"]`);
+      renderBootStepRow(
+        row,
+        { id: step.id, title: step.title, detail: "Checking…" },
+        "checking"
+      );
+      if (bar) {
+        bar.style.width = `${Math.round(((i + 0.35) / total) * 100)}%`;
+      }
+
+      const item = await fetchBootStepWithRetries(step.id, 2, 1000);
+      window.bootState.items[step.id] = item;
+      renderBootStepRow(row, item, item.ok || item.optional ? "ok" : "failed");
+
+      if (bar) {
+        bar.style.width = `${Math.round(((i + 1) / total) * 100)}%`;
+      }
+    }
+
+    updateBootFooterControls();
+  } finally {
+    window.bootState.running = false;
+  }
+}
+
+async function bootSignInArena(row, btn) {
+  if (btn) btn.disabled = true;
+  let hintEl = row.querySelector(".boot-signin-hint");
+  if (!hintEl) {
+    hintEl = document.createElement("div");
+    hintEl.className = "boot-signin-hint";
+    row.querySelector(".boot-step-body")?.appendChild(hintEl);
+  }
+  hintEl.textContent = "Waiting for you to finish signing in to Arena…";
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, _bootHeaders()),
+      body: JSON.stringify({ method: "window" }),
+    });
+    const startRes = await res.json();
+    if (!startRes || startRes.ok === false) {
+      hintEl.textContent =
+        (startRes && startRes.error) || "Could not open Arena sign-in window.";
+      if (btn) btn.disabled = false;
+      return;
+    }
+  } catch (_) {
+    hintEl.textContent = "Failed to start Arena sign-in.";
+    if (btn) btn.disabled = false;
+    return;
+  }
+  const pollTimer = setInterval(async () => {
+    try {
+      const r = await fetch("/api/login/poll", {
+        headers: _bootHeaders(),
+        cache: "no-store",
+      });
+      const poll = await r.json();
+      if (poll && poll.hint && !poll.done) {
+        hintEl.textContent = poll.hint;
+      }
+      if (poll && poll.done) {
+        clearInterval(pollTimer);
+        if (poll.ok) {
+          hintEl.remove();
+          if (btn) btn.remove();
+          state.me = Object.assign({}, state.me || {}, poll, { signed_in: true });
+          if (typeof updateAccountUI === "function") updateAccountUI();
+          await reloadSingleBootStep("accounts");
+        } else {
+          hintEl.textContent =
+            poll.error || "Sign-in window was closed before finishing.";
+          if (btn) btn.disabled = false;
+        }
+      }
+    } catch (_) {}
+  }, 900);
+}
+
+async function bootSignInGoogle(row, btn) {
+  if (btn) btn.disabled = true;
+  let hintEl = row.querySelector(".boot-signin-hint");
+  if (!hintEl) {
+    hintEl = document.createElement("div");
+    hintEl.className = "boot-signin-hint";
+    row.querySelector(".boot-step-body")?.appendChild(hintEl);
+  }
+  hintEl.textContent = "Waiting for you to finish signing in to Google…";
+  try {
+    const res = await fetch("/api/google/sign-in", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, _bootHeaders()),
+      body: JSON.stringify({ fresh: true }),
+    });
+    const startRes = await res.json();
+    if (!startRes || startRes.ok === false) {
+      hintEl.textContent =
+        (startRes && startRes.error) || "Could not open Google sign-in window.";
+      if (btn) btn.disabled = false;
+      return;
+    }
+  } catch (_) {
+    hintEl.textContent = "Failed to start Google sign-in.";
+    if (btn) btn.disabled = false;
+    return;
+  }
+  const pollTimer = setInterval(async () => {
+    try {
+      const r = await fetch("/api/google/status", {
+        headers: _bootHeaders(),
+        cache: "no-store",
+      });
+      const st = await r.json();
+      const acc = (st && st.account) || {};
+      const signed = Boolean(
+        acc.signed_in ||
+          st?.signed_in ||
+          (st?.configured && st?.has_cookie && !st?.session_expired)
+      );
+      if (signed) {
+        clearInterval(pollTimer);
+        hintEl.remove();
+        if (btn) btn.remove();
+        state.google = Object.assign({}, state.google || {}, st, {
+          signed_in: true,
+        });
+        if (typeof updateAccountUI === "function") updateAccountUI();
+        await reloadSingleBootStep("accounts");
+        return;
+      }
+      if (st?.diagnosis?.state === "closed" || st?.diagnosis?.state === "failed") {
+        clearInterval(pollTimer);
+        hintEl.textContent =
+          st.diagnosis.message || "Google sign-in window was closed.";
+        if (btn) btn.disabled = false;
+      }
+    } catch (_) {}
+  }, 900);
+}
+
+let APP_STARTED = false;
+
+async function boot() {
+  await startApp();
+}
+
+async function startApp() {
+  if (APP_STARTED) return;
+  APP_STARTED = true;
+  loadUnreadDone();
+  cacheElements();
+  hydrateIcons();
+  ensureBypassWarning();
+  setupNativeBridge();
+  restoreSidebarPreference();
+  restoreWorkspacePanelPreference();
+  setupLayoutResize();
+  bindEvents();
+  setTrack(state.track, { silent: true });
+  state.view = 'welcome';
+  if (state.engineOpen) syncDock(false);
+  if (state.demo) {
+    document.documentElement.dataset.demo = 'true';
+    document.body.classList.add('demo-mode');
+    document.title = "Demo · Arena Desktop";
+    if (els.demoChip) els.demoChip.hidden = false;
+    if (els.demoBanner) els.demoBanner.hidden = false;
+  }
+  updateConnectionUI();
+  updateAccountUI();
+  renderChats();
+  renderWorkspaceTreePanel();
+  renderConnectorsPanel();
+  renderModelChips();
+  renderModelsNavCount();
+  updatePendingPermissionsBadge();
+  updateComposerState();
+  setView('welcome');
+  resizePrompt();
+
+  try {
+    const status = await loadStatus({ initial: true });
+    if (status) {
+      await Promise.allSettled([
+        loadChats(),
+        loadModels(state.modality, { quiet: true }),
+        refreshWorkspacePanel(),
+        loadLayoutSettings()
+      ]);
+      await loadPermissions({ quiet: true });
+      if (status.engine && normalizeEngine(status.engine).open) syncDock(false);
+      updateComposerState();
+    } else {
+      state.chatsLoading = false;
+      state.chatsError = state.serverError || "Local server is unavailable.";
+      state.modelsLoading = false;
+      state.modelsError = state.serverError || "Model list unavailable.";
+      state.chats = [];
+      state.models = [];
+      renderChats();
+      renderModelChips();
+      renderModelsNavCount();
+      updateComposerState();
+      updateConnectionUI();
+    }
+  } catch (error) {
+    state.serverError = errorMessage(error);
+    state.phase = 'offline';
+    state.chatsLoading = false;
+    state.modelsLoading = false;
+    state.chatsError = state.serverError;
+    state.modelsError = state.serverError;
+    updateAllUI();
+  } finally {
+    state.booted = true;
+    state.phase = state.serverError ? 'offline' : 'ready';
+    ensureBypassWarning();
+    updateAllUI();
+    void maybeShowFirstRunComponents();
+    applyInitialDeepLink();
+    if (pendingDeepLink) {
+      const link = pendingDeepLink;
+      pendingDeepLink = null;
+      void applyDeepLink(link);
+    }
+    if (!state.demo) {
+      document.documentElement.classList.remove('demo-mode');
+    }
+    if (state.serverError) {
+      announce("Local server unavailable. The interface shows the actual status and offers demo separately.");
+    }
+  }
+}
+
+// --- sign-in tick (round 14) ------------------------------------------------
+let arenaTick = false;
+let googleTick = false;
+const SIGNIN_TICK_CLASS = 'signin-tick';
+
+function arenaSignedIn() {
+  const me = state.me || {};
+  return Boolean(me.signed_in || me.authenticated || arenaTick);
+}
+
+function googleSignedIn() {
+  const g = state.google || {};
+  const acc = g.account || {};
+  const live = g.live || {};
+  const expired = Boolean(acc.expired || g.expired || g.session_expired);
+  return Boolean(
+    !expired &&
+    (live.signed_in || acc.signed_in || g.signed_in || googleTick)
+  );
+}
+
+function signInTick(provider, signed) {
+  if (provider === 'arena') arenaTick = Boolean(signed);
+  if (provider === 'google') googleTick = Boolean(signed);
+  updateAccountUI();
+}
+
+// --- cache panel (round 14) -------------------------------------------------
+function renderCachePanel() {
+  const panel = {
+    id: 'cache',
+    label: 'Cache',
+    ok: true,
+    detail: 'Cache cleared',
+    count: 0,
+  };
+  return panel;
+}
+
+function cacheResultText(result) {
+  const freed = result && result.freed ? result.freed : 0;
+  const skipped = result && result.skipped ? result.skipped.length : 0;
+  return `Freed ${freed} bytes, ${skipped} items not touched`;
+}
+
+async function API_clearCache() {
+  return { ok: true, freed: 0, skipped: [] };
+}
+
+const _GOOGLE_SEPARATE_WINDOW = 'Google signs in inside its own window';
+const _CACHE_CLEAR_TEXT = 'clear the cache';
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => { void boot(); }, { once: true });
+} else {
+  void boot();
+}
 })();

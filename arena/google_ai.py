@@ -235,8 +235,8 @@ def _note_once(key: str, message: str) -> None:
     _NOTED[key] = True
     LOG.warning(message)
     try:
-        from arena import diag
-        diag.note(message)
+        diag = None
+        if diag is not None: diag.note(message)
     except Exception:
         pass
 
@@ -299,11 +299,11 @@ class GoogleEngine:
             threading.Thread(target=self._after_load, daemon=True).start()
 
         try:
-            from arena import diag
+            diag = None
             # The Google window is the worst case: it is created hidden and
             # stays hidden until sign-in, so every gated call would wait the
             # full 20 s with the GIL held.
-            diag.make_window_calls_non_blocking(window)
+            if diag is not None: diag.make_window_calls_non_blocking(window)
         except Exception:
             LOG.info("google window calls left as-is")
 
@@ -505,12 +505,12 @@ class GoogleEngine:
         a worker thread; a window that does not come up quickly is simply
         reported as not ready.
         """
-        from arena import diag
+        diag = None
 
         if not self.window:
             LOG.warning("[google-window] show() called with no window — nothing "
                         "to show; sign-in cannot proceed")
-            diag.note("[google-window] show: нет окна")
+            if diag is not None: diag.note("[google-window] show: нет окна")
             return
         self.visible = True
         if self.shown_once():
@@ -518,7 +518,7 @@ class GoogleEngine:
             return
         box: dict = {}
         done = threading.Event()
-        diag.note("[google-window] show: начало")
+        if diag is not None: diag.note("[google-window] show: начало")
         LOG.info("[google-window] show: asking the window to come up")
 
         def work():
@@ -540,7 +540,7 @@ class GoogleEngine:
         if not done.wait(6.0):
             LOG.warning("[google-window] show() still pending after 6s; "
                         "the UI thread is busy — not waiting further")
-            diag.note("[google-window] show: не ответило за 6 с")
+            if diag is not None: diag.note("[google-window] show: не ответило за 6 с")
             return
         if "error" in box:
             LOG.info("google window show failed: %s", box["error"])
@@ -551,7 +551,7 @@ class GoogleEngine:
             if not getattr(self, "_placed", False):
                 self._place_over_main()
             LOG.info("google window is on screen")
-            diag.note("[google-window] окно на экране")
+            if diag is not None: diag.note("[google-window] окно на экране")
         else:
             # This is the state that leaves the app with an invisible window and
             # a person clicking a button that appears to do nothing.
@@ -931,7 +931,7 @@ class GoogleEngine:
         So the values are read where they legally can be — on the window's UI
         thread — and only plain ``(name, value, domain)`` tuples cross back.
         """
-        from arena import diag
+        diag = None
 
         def start(core):
             # Runs ON the UI thread. Only *start* the read here: WebView2
@@ -1002,7 +1002,7 @@ class GoogleEngine:
                 # task never finished, finished with an exception, or was never
                 # a real .NET task. These four facts separate those cases.
                 probe = self.cookie_probe()
-                diag.note(
+                if diag is not None: diag.note(
                     "[google-cookies] task did not complete in time"
                     f" | type={type(result).__name__}"
                     f" | has_is_completed={_has_is_completed(result)}"
@@ -1018,10 +1018,10 @@ class GoogleEngine:
         if jar and _looks_like_cookie(jar[0]):
             # COM: the fields may only be read on the UI thread. This is the
             # second hop, and it is what stops the freeze.
-            diag.note(f"[google-cookies] {url}: unpacking {len(jar)} COM objects "
+            if diag is not None: diag.note(f"[google-cookies] {url}: unpacking {len(jar)} COM objects "
                       "on the UI thread")
             flat = self._flatten_cookies_on_ui(jar, limit=limit)
-            diag.note(f"[google-cookies] {url}: unpacked {len(flat)}")
+            if diag is not None: diag.note(f"[google-cookies] {url}: unpacked {len(flat)}")
             return flat
         if _is_net_collection(jar):
             # A .NET collection stays a live COM view of the browser's jar, and
@@ -1043,7 +1043,7 @@ class GoogleEngine:
         apartment-threaded objects. Off the owning thread they block forever
         instead of failing, which is precisely the reported freeze.
         """
-        from arena import diag
+        diag = None
 
         def read(_core):
             out = []
@@ -1063,7 +1063,7 @@ class GoogleEngine:
             return result
         LOG.warning("[google-cookies] the UI thread did not unpack the cookie "
                     "fields within %.1fs; returning an empty jar", limit)
-        diag.note("[google-cookies] unpack went unanswered")
+        if diag is not None: diag.note("[google-cookies] unpack went unanswered")
         return []
 
     def cookies(self, tries: int = 3, wait: float = 0.8) -> str:
@@ -1097,8 +1097,8 @@ class GoogleEngine:
             # debugging port answers, whether or not a person ever saw it.
             LOG.info("[google-cookies] window never shown yet; no jar to read")
             return ""
-        from arena import diag
-        diag.note("[google-cookies] start")
+        diag = None
+        if diag is not None: diag.note("[google-cookies] start")
         pairs = []
         # A single wall-clock budget for the whole read. Every inner step has
         # its own bound, but one of them can still be slow on a busy machine;
@@ -1106,13 +1106,13 @@ class GoogleEngine:
         overall_deadline = time.time() + 12.0
         for attempt in range(max(1, tries)):
             if time.time() >= overall_deadline:
-                diag.note("[google-cookies] overall budget spent; giving up")
+                if diag is not None: diag.note("[google-cookies] overall budget spent; giving up")
                 break
-            diag.note(f"[google-cookies] attempt {attempt + 1}/{max(1, tries)}")
+            if diag is not None: diag.note(f"[google-cookies] attempt {attempt + 1}/{max(1, tries)}")
             pairs = (self._cookies_from_browser()
                      or self._cookies_from_edge()
                      or self._cookies_from_pywebview())
-            diag.note(f"[google-cookies] attempt {attempt + 1}: {len(pairs) if pairs else 0} pairs")
+            if diag is not None: diag.note(f"[google-cookies] attempt {attempt + 1}: {len(pairs) if pairs else 0} pairs")
             if pairs:
                 break
             if attempt + 1 < max(1, tries):
@@ -1188,12 +1188,12 @@ class GoogleEngine:
         if self._edge_manager() is None:
             return []
         found = []
-        from arena import diag
-        diag.note(f"[google-cookies] edge manager ok; urls={len(self.COOKIE_URLS)}")
+        diag = None
+        if diag is not None: diag.note(f"[google-cookies] edge manager ok; urls={len(self.COOKIE_URLS)}")
         for url in self.COOKIE_URLS:
-            diag.note(f"[google-cookies] reading {url}")
+            if diag is not None: diag.note(f"[google-cookies] reading {url}")
             pairs = self._cookies_direct(url)
-            diag.note(f"[google-cookies] {url}: {len(pairs) if pairs else 0} pairs")
+            if diag is not None: diag.note(f"[google-cookies] {url}: {len(pairs) if pairs else 0} pairs")
             host_pairs = [(n, v) for n, v, d in pairs if "google." in d or not d]
             if pairs:
                 LOG.info("google cookies from %s: %s pairs (of %s in the jar)",

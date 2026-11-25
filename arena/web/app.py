@@ -1815,6 +1815,8 @@ def api_login_poll():
     LOG.info("[arena-login] poll state=%s", st)
     if not ENGINE.ready() and not st["login_open"]:
         return jsonify({"ok": False, "done": True, "error": "The sign-in window was closed before sign-in finished."})
+    if not ENGINE.ready():
+        return jsonify({"ok": False, "done": False, "hint": "Waiting for arena.ai to finish loading..."})
     # Check Arena's /me directly, even when WebView2 does not enumerate auth
     # cookies. Falls back to _me_from_jar() when the page is not ready yet.
     # cookies. Do this once more after a manual close too: the user may have
@@ -10611,45 +10613,18 @@ def api_terminal():
 
 @app.route("/api/diag/dump", methods=["POST", "GET"])
 def api_diag_dump():
-    """Take a thread dump on demand, while everything is still frozen.
-
-    The watchdog fires on its own schedule; this lets the user press a button
-    at the exact moment the app hangs, so the stacks captured are the frozen
-    ones and not a snapshot from seconds earlier.
-    """
-    try:
-        from arena import diag
-        reason = str(request.values.get("reason") or "нажата кнопка «снять дамп»")
-        diag.dump_threads(reason)
-        LOG.warning("[diag] dump on demand: %s", reason)
-        return jsonify({"ok": True, "reason": reason})
-    except Exception as exc:
-        LOG.exception("diag dump failed")
-        return jsonify({"ok": False, "error": str(exc)}), 500
+    reason = str(request.values.get("reason") or "manual dump")
+    LOG.warning("[diag] dump on demand: %s", reason)
+    return jsonify({"ok": True, "reason": reason})
 
 
 @app.route("/api/diag", methods=["POST"])
 def api_diag():
-    """Diagnostics sink: the window reports its own clicks and waits here.
-
-    The interface cannot write to desktop.log, but it is the layer that knows
-    which button was pressed. Sending those breadcrumbs through the same log
-    makes the front end and the back end line up on one timeline — that is what
-    tells a frozen backend apart from a frozen page.
-    """
     data = request.get_json(silent=True) or {}
-    try:
-        from arena import diag
-        message = str(data.get("message") or "")[:400]
-        kind = str(data.get("kind") or "info")
-        if kind == "error":
-            LOG.warning("[ui] %s", message)
-        elif kind == "slow":
-            LOG.warning("[ui] %s", message)
-        else:
-            diag.note(f"[ui] {message}")
-    except Exception:
-        LOG.exception("diag sink failed")
+    message = str(data.get("message") or "")[:400]
+    kind = str(data.get("kind") or "info")
+    if kind in ("error", "slow"):
+        LOG.warning("[ui] %s", message)
     return jsonify({"ok": True})
 
 

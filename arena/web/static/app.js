@@ -4168,62 +4168,57 @@ You can start with a more structured option: one script, short captions, and a c
 
   function renderChatHead() {
     if (!els.chatTitle) return;
-    const meta = modeMeta(state.mode);
-    const modality = modalityMeta(state.modality);
     els.chatTitle.textContent = state.activeChatTitle || "Conversation";
-    clear(els.chatMeta);
-    const google = state.track === 'google';
-    if (google) {
-      // Google AI mode has no mode / work type / model choice: one honest chip
-      // plus the shared workspace chip, and no "Refresh from Arena".
-      if (els.chatEyebrow) els.chatEyebrow.textContent = "Active dialogue · Google AI mode";
-      els.chatMeta.append(
-        el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: "Google AI mode" }))
-      );
-    } else {
-      if (els.chatEyebrow) els.chatEyebrow.textContent = `Active dialogue · ${meta.label}`;
-      els.chatMeta.append(
-        el('span', { class: 'meta-chip' }, iconEl('git-branch'), el('span', { text: meta.label })),
-        el('span', { class: 'meta-chip' }, iconEl(modality.icon), el('span', { text: modality.label }))
-      );
-      if (state.mode === 'agent') {
-        els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: "Automatic model selection" })));
-      } else if (state.mode !== 'battle') {
-        const name = currentModelA()?.name || "No model selected";
-        els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: name })));
-        if (state.mode === 'side-by-side') {
-          els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: currentModelB()?.name || "Model B not selected" })));
-        }
-      } else {
-        els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('spark'), el('span', { text: "Opponents are selected by the server" })));
-      }
-    }
-    if (state.workspace) {
-      els.chatMeta.append(el('span', { class: 'meta-chip' }, iconEl('folder'), el('span', { text: workspaceName() })));
-    }
-    if (state.activeChatId && state.messages.length) {
+    const menu = document.getElementById('chatActionsMenu');
+    if (menu) {
+      clear(menu);
+      const google = state.track === 'google';
       const activeSummary = state.chats.find((chat) => String(chat.id) === String(state.activeChatId));
       const linked = !google && Boolean(state.activeChatEvalId || activeSummary?.eval_id);
-      if (linked) {
-        const refreshing = String(state.refreshingChatId || '') === String(state.activeChatId);
-        const generating = chatIsGenerating(state.activeChatId);
-        const refresh = el('button', {
-          class: 'meta-chip meta-chip-btn', type: 'button', disabled: refreshing || generating,
-          title: generating ? 'Refresh is available when this answer finishes'
-            : 'Download newer turns from arena.ai into this chat',
-          'aria-label': 'Refresh this chat from arena.ai'
-        }, iconEl('refresh'), el('span', { text: refreshing ? 'Refreshing…' : 'Refresh from Arena' }));
-        refresh.addEventListener('click', () => { void refreshActiveChat(); });
-        els.chatMeta.appendChild(refresh);
+      if (state.activeChatId && state.messages.length) {
+        if (linked) {
+          const refreshing = String(state.refreshingChatId || '') === String(state.activeChatId);
+          const generating = chatIsGenerating(state.activeChatId);
+          const refresh = el('button', {
+            class: 'chat-actions-menu-item', type: 'button', role: 'menuitem',
+            disabled: refreshing || generating,
+            title: generating ? 'Refresh is available when this answer finishes'
+              : 'Download newer turns from arena.ai into this chat'
+          }, iconEl('refresh'), el('span', { text: refreshing ? 'Refreshing…' : 'Refresh from Arena' }));
+          refresh.addEventListener('click', () => {
+            menu.hidden = true;
+            els.chatSettingsButton?.setAttribute('aria-expanded', 'false');
+            void refreshActiveChat();
+          });
+          menu.appendChild(refresh);
+        }
+        const exp = el('button', {
+          class: 'chat-actions-menu-item', type: 'button', role: 'menuitem',
+          title: 'Download this chat as Markdown'
+        }, iconEl('download'), el('span', { text: 'Export .md' }));
+        exp.addEventListener('click', () => {
+          menu.hidden = true;
+          els.chatSettingsButton?.setAttribute('aria-expanded', 'false');
+          exportChatMd();
+        });
+        menu.appendChild(exp);
+        const expHtml = el('button', {
+          class: 'chat-actions-menu-item', type: 'button', role: 'menuitem',
+          title: 'Download this chat as a standalone styled HTML file'
+        }, iconEl('download'), el('span', { text: 'Export HTML' }));
+        expHtml.addEventListener('click', () => {
+          menu.hidden = true;
+          els.chatSettingsButton?.setAttribute('aria-expanded', 'false');
+          exportChatMd('html');
+        });
+        menu.appendChild(expHtml);
+      } else {
+        menu.appendChild(el('div', {
+          class: 'chat-actions-menu-item',
+          style: { opacity: 0.6, cursor: 'default' },
+          text: 'No actions yet'
+        }));
       }
-      const exp = el('button', { class: 'meta-chip meta-chip-btn', type: 'button', title: 'Download this chat as Markdown' },
-        iconEl('download'), el('span', { text: 'Export .md' }));
-      exp.addEventListener('click', () => exportChatMd());
-      els.chatMeta.appendChild(exp);
-      const expHtml = el('button', { class: 'meta-chip meta-chip-btn', type: 'button', title: 'Download this chat as a standalone styled HTML file' },
-        iconEl('download'), el('span', { text: 'Export HTML' }));
-      expHtml.addEventListener('click', () => exportChatMd('html'));
-      els.chatMeta.appendChild(expHtml);
     }
   }
 
@@ -4904,23 +4899,43 @@ You can start with a more structured option: one script, short captions, and a c
       name: lane.modelName, org: lane.modelOrg, color: lane.modelColor,
       icon_url: getModel(lane.modelId)?.icon_url || ''
     });
-    const avatar = laneLogo
-      ? el('span', { class: 'model-avatar has-logo', 'aria-hidden': 'true' }, laneLogo)
-      : el('span', {
+    const isAgentLane = Boolean(
+      turn.mode === 'agent' || lane.modelName === 'Agent' || (state.mode === 'agent' && !lane.modelName)
+    );
+    const isMaxLane = Boolean((lane.modelName || '').trim().toLowerCase() === 'max');
+    let avatar;
+    if (isAgentLane) {
+      avatar = el('span', {
+        class: `model-avatar has-logo agent-icon-avatar${lane.streaming ? ' is-spinning' : ''}`,
+        'aria-hidden': 'true'
+      });
+      avatar.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="12" x2="4.5" y2="8.5"/><line x1="8" y1="12" x2="4.5" y2="15.5"/><line x1="16" y1="12" x2="19.5" y2="8.5"/><line x1="16" y1="12" x2="19.5" y2="15.5"/><polyline points="9,5 12,8 15,5"/><polyline points="9,19 12,16 15,19"/><circle cx="4.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="4.5" cy="15.5" r="1.4" fill="currentColor"/><circle cx="19.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="19.5" cy="15.5" r="1.4" fill="currentColor"/><circle cx="9" cy="5" r="1.3" fill="currentColor"/><circle cx="15" cy="5" r="1.3" fill="currentColor"/><circle cx="9" cy="19" r="1.3" fill="currentColor"/><circle cx="15" cy="19" r="1.3" fill="currentColor"/></svg>';
+    } else if (isMaxLane) {
+      avatar = el('span', {
+        class: 'model-avatar has-logo max-icon-avatar',
+        'aria-hidden': 'true'
+      });
+      avatar.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><rect x="2" y="2" width="20" height="20" rx="5" fill="#f3f3f1"/><path d="M7 16V8L12 13L17 8V16" stroke="#181816" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="7" cy="8" r="1.6" fill="#181816"/><circle cx="17" cy="8" r="1.6" fill="#181816"/><circle cx="7" cy="16" r="1.6" fill="#181816"/><circle cx="17" cy="16" r="1.6" fill="#181816"/><circle cx="12" cy="13" r="1.6" fill="#181816"/></svg>';
+    } else if (laneLogo) {
+      avatar = el('span', { class: 'model-avatar has-logo', 'aria-hidden': 'true' }, laneLogo);
+    } else {
+      avatar = el('span', {
         class: 'model-avatar',
         style: { background: avatarColor, color: '#1d221e' },
         'aria-hidden': 'true',
         text: state.track === 'google' && !lane.modelName
           ? 'G' : initialLetters(lane.modelName || (key === 'b' ? 'Model B' : 'Model A'))
       });
+    }
     const label = lane.modelOrg || (lane.modelName ? '' : (key === 'b' ? "Model B" : "Model A"));
     const googleLane = state.track === 'google' && !lane.modelName;
+    const hideSlotBadge = googleLane || lane.modelName === 'Google AI mode' || isAgentLane || isMaxLane;
     const head = el('div', { class: 'assistant-head' },
       avatar,
       el('div', { class: 'assistant-id' },
         el('span', { class: 'model-name', title: lane.modelName || '',
           text: googleLane ? "Google AI mode" : (lane.modelName || (key === 'b' ? "Model B" : "Model A")) }),
-        (googleLane || lane.modelName === 'Google AI mode') ? null
+        hideSlotBadge ? null
           : el('span', { class: 'lane-badge', text: key.toUpperCase() }),
         turn.vote === (key === 'a' ? 'model_a' : 'model_b')
           ? el('span', { class: 'lane-winner', title: "Your choice in this battle" }, iconEl('trophy'), el('span', { text: "best" }))
@@ -13876,7 +13891,22 @@ You can start with a more structured option: one script, short captions, and a c
     els.heavySendBadge?.addEventListener('click', () => openSettings('usage'));
     els.sendButton?.setAttribute('type', 'submit');
     els.stopButton?.addEventListener('click', () => { void stopGeneration(); });
-    els.chatSettingsButton?.addEventListener('click', () => openSettings('permissions'));
+    els.chatSettingsButton?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const menu = document.getElementById('chatActionsMenu');
+      if (!menu) return;
+      const open = menu.hidden;
+      menu.hidden = !open;
+      els.chatSettingsButton.setAttribute('aria-expanded', String(open));
+    });
+    document.addEventListener('click', (e) => {
+      const wrap = document.getElementById('chatHeadMenuWrap');
+      const menu = document.getElementById('chatActionsMenu');
+      if (menu && !menu.hidden && wrap && !wrap.contains(e.target)) {
+        menu.hidden = true;
+        els.chatSettingsButton?.setAttribute('aria-expanded', 'false');
+      }
+    });
 
     /* Attachments: +, file picker, paste, drag & drop */
     els.attachButton?.addEventListener('click', () => {
@@ -14778,6 +14808,13 @@ let APP_STARTED = false;
 
 async function boot() {
   await startApp();
+  let retries = 0;
+  const timer = setInterval(() => {
+    retries += 1;
+    if (typeof refreshModels === 'function') void refreshModels({ silent: true });
+    if (typeof refreshChats === 'function') void refreshChats({ silent: true });
+    if (retries >= 5) clearInterval(timer);
+  }, 2000);
 }
 
 async function startApp() {

@@ -20,16 +20,12 @@
              fold · repository · chats · logo + name · profile · settings ·
              Discord · workspace folder. -->
         <div class="topbar-row">
-          <!-- Left: fold, repository, chats. -->
+          <!-- Left: fold, chats. -->
           <div class="topbar-edge topbar-edge-left">
             <button class="icon-button rail-toggle" id="collapseSidebar" type="button"
                     aria-label="Unfold the chats" aria-expanded="false" title="Unfold the chats">
               <span data-icon="panel-left"></span>
             </button>
-            <a class="icon-button topbar-icon topbar-repo" id="repoButton" href="https://github.com/Maxusimlive/Arena-Desktop"
-               target="_blank" rel="noopener noreferrer" aria-label="Repository" title="Repository">
-              <span data-icon="code"></span>
-            </a>
             <button class="icon-button chats-drawer-button" id="chatsDrawerButton" type="button"
                     aria-haspopup="dialog" aria-expanded="false" aria-label="All chats" title="All chats">
               <span data-icon="message"></span>
@@ -58,9 +54,14 @@
                   <span data-icon="clock"></span>
                   <span>Chats</span>
                 </div>
-                <button class="icon-button tiny" id="chatsDrawerClose" type="button" aria-label="Close the chat list">
-                  <span data-icon="x"></span>
-                </button>
+                <div class="chats-drawer-head-actions">
+                  <button class="icon-button tiny" id="refreshChats" type="button" aria-label="Refresh chats and models" title="Refresh chats and models">
+                    <span data-icon="refresh"></span>
+                  </button>
+                  <button class="icon-button tiny" id="chatsDrawerClose" type="button" aria-label="Close the chat list">
+                    <span data-icon="x"></span>
+                  </button>
+                </div>
               </header>
               <nav class="chats-drawer-modes" aria-label="Modes">
                 <button class="nav-item" id="navArenaMode" type="button">
@@ -109,6 +110,10 @@
             <button class="icon-button account-gear" id="accountSettingsBtn" type="button" data-action="settings" aria-label="Settings" title="Settings">
               <span data-icon="settings"></span>
             </button>
+            <a class="icon-button topbar-icon topbar-repo" id="repoButton" href="https://github.com/Maxusimlive/Arena-Desktop"
+               target="_blank" rel="noopener noreferrer" aria-label="Repository" title="Repository">
+              <span data-icon="code"></span>
+            </a>
             <a class="icon-button topbar-icon topbar-discord" id="discordButton" href="https://discord.com/users/877543689428287489"
                target="_blank" rel="noopener noreferrer" aria-label="Discord" title="Discord">
               <span data-icon="discord"></span>
@@ -186,14 +191,15 @@
           <section class="chat-view" id="chatView" aria-labelledby="chatTitle" hidden>
             <div class="chat-head">
               <div class="chat-head-copy">
-                <p class="eyebrow" id="chatEyebrow">Active chat</p>
                 <h2 id="chatTitle">New chat</h2>
-                <div class="chat-meta" id="chatMeta"></div>
               </div>
               <div class="chat-head-actions">
-                <button class="icon-button" type="button" id="chatSettingsButton" aria-label="Chat settings" title="Settings">
-                  <span data-icon="sliders"></span>
-                </button>
+                <div class="chat-head-menu-wrap" id="chatHeadMenuWrap">
+                  <button class="icon-button" type="button" id="chatSettingsButton" aria-label="Chat actions" aria-haspopup="menu" aria-expanded="false" title="Chat actions">
+                    <span data-icon="sliders"></span>
+                  </button>
+                  <div class="chat-actions-menu" id="chatActionsMenu" role="menu" hidden></div>
+                </div>
               </div>
             </div>
 

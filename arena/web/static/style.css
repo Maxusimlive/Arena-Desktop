@@ -470,11 +470,16 @@ svg { display: block; }
   text-align: left;
 }
 .account-button:hover { background: #252929; border-color: #323636; }
-.account-button.is-signed-in,
-.account-button.is-signed-in:disabled,
+.account-button.is-signed-in {
+  background: rgba(63, 185, 80, 0.16) !important;
+  border-color: rgba(63, 185, 80, 0.65) !important;
+  color: #7ee787 !important;
+  opacity: 1 !important;
+  cursor: pointer !important;
+  pointer-events: auto !important;
+}
 .boot-btn.is-signed-in,
 .boot-btn.is-signed-in:disabled,
-button.is-signed-in,
 button.is-signed-in:disabled {
   background: rgba(63, 185, 80, 0.16) !important;
   border-color: rgba(63, 185, 80, 0.65) !important;
@@ -4182,10 +4187,85 @@ body[data-track="google"] .chats-drawer::before { background: #141517; border-co
 /* ======================================================================
    Toolbar polish, round 3
    ====================================================================== */
-/* Repo icon: folded state only (the user's sketch of the folded bar has it,
-   the unfolded one does not). */
+/* Repo icon: unfolded state only, next to Discord. */
 .topbar-repo { display: none; }
-.app.rail-collapsed .topbar-repo { display: inline-flex; }
+.app:not(.rail-collapsed) .topbar-repo { display: inline-flex; }
+
+.chats-drawer-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Spinning agent icon while task is running */
+@keyframes arenaAgentSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.model-avatar.agent-icon-avatar {
+  background: transparent !important;
+  color: #e6e4de;
+}
+.model-avatar.agent-icon-avatar svg {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+.model-avatar.agent-icon-avatar.is-spinning svg {
+  animation: arenaAgentSpin 2.4s linear infinite;
+}
+.model-avatar.max-icon-avatar {
+  background: transparent !important;
+}
+.model-avatar.max-icon-avatar svg {
+  width: 24px;
+  height: 24px;
+  display: block;
+}
+
+/* Chat header actions dropdown */
+.chat-head-menu-wrap {
+  position: relative;
+}
+.chat-actions-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 196px;
+  padding: 6px;
+  border-radius: 10px;
+  background: #232321;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.chat-actions-menu[hidden] {
+  display: none !important;
+}
+.chat-actions-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #e8e6e1;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-actions-menu-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+.chat-actions-menu-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 
 /* Bigger logo and name, and they own the true centre of the bar. */
 .topbar-row { grid-template-columns: 1fr auto 1fr; }

@@ -9198,12 +9198,17 @@ def _google_track_stream(chat_id, message):
             effective = _google_compose_query(message, messages[:-1], hl)
             agent_on = bool(prefs.get("supervisor"))
             if agent_on:
-                try:
-                    ws = _active_workspace_dir()
-                    sys_prompt = agent.build_system_prompt(ws)
-                    effective = sys_prompt + "\n\nUser request:\n" + effective
-                except Exception:
-                    pass
+                ws = str(_workspace_dir())
+                sys_prompt = (
+                    f"[System: You are a local AI agent on Windows in workspace {ws}. "
+                    'You CAN run commands and edit files using XML tags: '
+                    '<tool name="run"><param name="command">...</param></tool>, '
+                    '<tool name="read"><param name="path">...</param></tool>, '
+                    '<tool name="write"><param name="path">...</param><param name="content">...</param></tool>, '
+                    '<tool name="ls"><param name="path">.</param></tool>. '
+                    'When asked to open apps, run commands, or edit files, output the <tool> tag directly.]'
+                )
+                effective = sys_prompt + "\n\n" + effective
             # A turn must never be able to sit here forever: the browser shows
             # a spinning card until *something* arrives, so the wait is bounded
             # and its expiry is reported like any other Google error.
@@ -9289,15 +9294,15 @@ def _google_track_stream(chat_id, message):
         # carries it out. Google stays the planner; the executor only follows
         # Local agent integration loop (same tool-calling loop as Direct mode).
         if answer and prefs.get("supervisor") and client is not None:
-            ws = _active_workspace_dir()
+            ws = _workspace_dir()
             for _round in range(1, 7):
                 calls = agent.parse_tool_calls(answer)
                 if not calls:
                     break
                 results_text = []
                 for call in calls:
-                    tool_name = call.get("tool") or ""
-                    tool_args = call.get("args") or {}
+                    tool_name = call.get("name") or ""
+                    tool_args = call.get("params") or {}
                     yield _sse({"type": "tool_call", "tool": tool_name, "args": tool_args, "model": "a"})
                     try:
                         out = agent.execute_tool(tool_name, tool_args, ws)

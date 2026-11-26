@@ -6737,11 +6737,11 @@ You can start with a more structured option: one script, short captions, and a c
         els.accountDot.classList.toggle('is-error', Boolean(g.expired)
           || Boolean(state.google?.window?.error));
       }
+      const googleDone = googleSignedIn();
+      const arenaDone = Boolean(state.authenticated || state.me?.signed_in);
       if (els.accountButton) {
         els.accountButton.setAttribute('aria-label', `Google profile: ${name}. ${sub}. Open accounts`);
         els.accountButton.setAttribute('aria-haspopup', 'menu');
-        const googleDone = googleSignedIn();
-        const arenaDone = Boolean(state.authenticated || state.me?.signed_in);
         const checkEl = els.accountCheck || document.getElementById('accountCheck');
         els.accountButton.classList.toggle('is-signed-in', googleDone);
         els.accountButton.classList.toggle('is-expired', !googleDone && g.expired);

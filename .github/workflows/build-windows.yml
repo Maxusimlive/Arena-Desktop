@@ -55,7 +55,6 @@ jobs:
           python -c "import platform, struct, sys; print(sys.executable); print(platform.platform()); print(platform.machine(), struct.calcsize('P') * 8)"
 
       - name: Run non-browser tests in timed groups
-        continue-on-error: true
         shell: pwsh
         run: python scripts/run_test_groups.py
 

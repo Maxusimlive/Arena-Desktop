@@ -9,11 +9,9 @@ the engine window (session creation, needs cookies + reCAPTCHA) and plain
 HTTPS requests against the /ai-proxy data plane (PAT bearer auth).
 """
 
-import base64
 import json
 import logging
 import os
-import re
 import time
 import urllib.parse
 import uuid
@@ -417,73 +415,24 @@ def in_url(origin: str, trigger_address: str) -> str:
             f"{urllib.parse.quote(str(trigger_address), safe='')}/in/append")
 
 
-def out_url_candidates(origin: str, trigger_address) -> list:
-    """Every .out spelling this client knows, most likely first.
-
-    Arena keeps the session reader behind its /ai-proxy; the resource form
-    and the version prefix are the two things that have drifted between
-    releases, so a short probe settles it at runtime.
-    """
-    base = origin.rstrip("/")
-    quoted = urllib.parse.quote(str(trigger_address), safe="")
-    session_form = quoted if str(trigger_address).startswith("session_") else f"session_{quoted}"
-    urls = [
-        chat_events_url(origin, trigger_address),
-        out_url(origin, trigger_address),
-        f"{base}/ai-proxy/realtime/v1/sessions/{session_form}/out",
-        f"{base}/ai-proxy/realtime/v2/sessions/{quoted}/out",
-        f"{base}/ai-proxy/realtime/v1/sessions/{quoted}/out/stream",
-        f"{base}/ai-proxy/realtime/v1/sessions/{quoted}/subscribe",
-        f"{base}/api/ai-proxy/realtime/v1/sessions/{quoted}/out",
-    ]
-    seen, unique = set(), []
-    for url in urls:
-        if url not in seen:
-            seen.add(url)
-            unique.append(url)
-    return unique
-
-
-def chat_events_url(origin: str, session_id) -> str:
-    """Arena's current reader for an agent session (SSE).
-
-    The website's transport rewrites the old Trigger ``.out`` resource to
-    ``/api/chat/:id/events`` before it hits the network, and strips the
-    Authorization header: the proxy authenticates with the account cookies.
-    """
-    return f"{origin.rstrip('/')}/api/chat/{urllib.parse.quote(str(session_id), safe='')}/events"
-
-
-def chat_input_url(origin: str, session_id) -> str:
-    """Arena's current writer for an agent session (one append = one message)."""
-    return f"{origin.rstrip('/')}/api/chat/{urllib.parse.quote(str(session_id), safe='')}/input"
-
-
-def chat_session_path(session_id) -> str:
-    """Start/reopen route: POST with ``{timezone}`` (was trigger-session)."""
-    return f"/api/chat/{urllib.parse.quote(str(session_id), safe='')}/session"
-
-
-def stream_headers(pat: str = None, last_event_id=None) -> dict:
+def stream_headers(pat: str, last_event_id=None) -> dict:
     headers = {
+        "Authorization": f"Bearer {pat}",
         "Accept": "text/event-stream",
         "Timeout-Seconds": "120",
     }
-    # No Authorization: Arena's proxy owns the token now and the website
-    # deletes the header before sending. Cookies are the credential.
     if last_event_id:
         headers["Last-Event-ID"] = str(last_event_id)
     return headers
 
 
 def append_headers(pat: str) -> dict:
-    headers = {
+    return {
+        "Authorization": f"Bearer {pat}",
         "Content-Type": "application/json",
+        "x-trigger-source": "sdk",
         "X-Part-Id": new_uuid(),
     }
-    # Cookies only: the website strips Authorization and x-trigger-source
-    # before its own append reaches Arena.
-    return headers
 
 
 def parse_bootstrap(payload) -> dict:
@@ -491,14 +440,10 @@ def parse_bootstrap(payload) -> dict:
     if not isinstance(payload, dict):
         return {"session_id": None, "trigger_address": None, "pat": None, "task_id": None}
     boot = payload.get("bootstrap") if isinstance(payload.get("bootstrap"), dict) else {}
-    # Token and address names drift between releases: read the canonical
-    # fields first, then fall back to a shape-aware search of the reply.
-    address = boot.get("triggerAddress") or find_trigger_address(payload)
-    pat = boot.get("publicAccessToken") or find_pat(payload)
     return {
         "session_id": payload.get("id") or boot.get("sessionId"),
-        "trigger_address": address,
-        "pat": pat,
+        "trigger_address": boot.get("triggerAddress"),
+        "pat": boot.get("publicAccessToken"),
         "task_id": boot.get("taskId"),
     }
 
@@ -619,99 +564,6 @@ def is_turn_complete_record(record) -> bool:
 
 def is_control(chunk) -> bool:
     return isinstance(chunk, dict) and str(chunk.get("type") or "").startswith("trigger:")
-
-
-_PAT_JWT_RE = re.compile(r"^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$")
-_PAT_KEY_HINTS = ("publicaccesstoken", "public_access_token", "triggertoken", "trigger_token",
-                  "publictoken", "public_token", "accesstoken", "access_token", "pat", "token")
-
-
-def _jwt_scopes_sessions(value) -> bool:
-    """True when the JWT payload scopes mention sessions (Trigger public token)."""
-    try:
-        payload = value.split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-    except Exception:
-        return False
-    scopes = claims.get("scopes")
-    if isinstance(scopes, dict):
-        for section in scopes.values():
-            if isinstance(section, dict) and any("session" in str(k).lower() for k in section):
-                return True
-    text = json.dumps(claims).lower()
-    return "sessions" in text
-
-
-def looks_like_pat(value) -> bool:
-    """A Trigger public access token: three base64url parts, session scopes."""
-    if not isinstance(value, str) or not _PAT_JWT_RE.match(value.strip()):
-        return False
-    return _jwt_scopes_sessions(value.strip())
-
-
-def find_pat(payload, depth=0):
-    """Best-effort PAT lookup in an Arena JSON reply (create or chat snapshot).
-
-    Only values that actually look like a Trigger session token are accepted,
-    so an unrelated JWT (auth cookie, captcha) must never win.
-    """
-    if depth > 6:
-        return None
-    if isinstance(payload, dict):
-        # Token-named keys first, then any value.
-        for key, value in payload.items():
-            if isinstance(value, str) and any(h in str(key).lower() for h in _PAT_KEY_HINTS):
-                if looks_like_pat(value):
-                    return value.strip()
-        for value in payload.values():
-            found = find_pat(value, depth + 1)
-            if found:
-                return found
-        return None
-    if isinstance(payload, list):
-        for item in payload:
-            found = find_pat(item, depth + 1)
-            if found:
-                return found
-    return None
-
-
-def find_trigger_address(payload, depth=0):
-    """The authoritative session address in a create reply or chat snapshot."""
-    if depth > 6:
-        return None
-    if isinstance(payload, dict):
-        for key in ("triggerAddress", "trigger_address"):
-            value = payload.get(key)
-            if isinstance(value, str) and value:
-                return value
-        boot = payload.get("bootstrap")
-        if isinstance(boot, dict):
-            for key in ("triggerAddress", "trigger_address"):
-                value = boot.get(key)
-                if isinstance(value, str) and value:
-                    return value
-        for key, value in payload.items():
-            if "triggeraddress" in str(key).lower().replace("_", ""):
-                if isinstance(value, str) and value:
-                    return value
-        for value in payload.values():
-            found = find_trigger_address(value, depth + 1)
-            if found:
-                return found
-        return None
-    if isinstance(payload, list):
-        for item in payload:
-            found = find_trigger_address(item, depth + 1)
-            if found:
-                return found
-    return None
-
-
-def coordinates(payload):
-    """(trigger_address, pat) recovered from a create reply or chat snapshot."""
-    return find_trigger_address(payload), find_pat(payload)
 
 
 def refreshed_pat(record):

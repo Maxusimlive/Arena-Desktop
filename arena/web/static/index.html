@@ -12,129 +12,138 @@
   <a class="skip-link" href="#prompt">Skip to the message box</a>
 
   <div class="app" id="app" data-dock="closed">
+    <aside class="sidebar" id="sidebar" aria-label="Sidebar">
+      <header class="sidebar-head">
+        <a class="brand" href="#" data-action="home" aria-label="Arena Desktop — home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" fill="none" focusable="false">
+              <rect x="1.25" y="1.25" width="29.5" height="29.5" rx="9" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M16 7.5c.65 4.65 3.85 7.85 8.5 8.5-4.65.65-7.85 3.85-8.5 8.5-.65-4.65-3.85-7.85-8.5-8.5 4.65-.65 7.85-3.85 8.5-8.5Z" fill="currentColor"/>
+            </svg>
+          </span>
+          <span class="brand-copy">
+            <span class="brand-name">Arena</span>
+            <span class="brand-sub">Desktop</span>
+          </span>
+        </a>
+        <button class="icon-button collapse-button" id="collapseSidebar" type="button" aria-label="Collapse sidebar" aria-expanded="true" title="Collapse sidebar">
+          <span data-icon="panel-left"></span>
+        </button>
+      </header>
+
+      <div class="sidebar-primary">
+        <button class="new-chat-button" id="newChatBtn" type="button" aria-label="New chat">
+          <span data-icon="plus"></span>
+          <span class="new-chat-label">New chat</span>
+        </button>
+
+        <nav class="sidebar-nav" aria-label="Main sections">
+          <button class="nav-item" id="modelsNavBtn" type="button">
+            <span data-icon="layers"></span>
+            <span>Models</span>
+            <span class="nav-count" id="modelsNavCount" aria-hidden="true">—</span>
+          </button>
+          <button class="nav-item" id="searchNavBtn" type="button">
+            <span data-icon="search"></span>
+            <span>Search</span>
+          </button>
+          <button class="nav-item" id="workspacePanelNavBtn" type="button" data-action="workspace-panel">
+            <span data-icon="folder"></span>
+            <span>Workspace</span>
+          </button>
+        </nav>
+      </div>
+
+      <section class="sidebar-recents" aria-labelledby="recentsHeading">
+        <div class="recents-head">
+          <button class="recents-title" id="recentsToggle" type="button" aria-expanded="true" aria-controls="recentsBody">
+            <span data-icon="clock"></span>
+            <span id="recentsHeading">Chats</span>
+            <span class="recents-count" id="chatCount"></span>
+          </button>
+          <button class="icon-button tiny" id="refreshChats" type="button" aria-label="Refresh the chat list" title="Refresh list">
+            <span data-icon="refresh"></span>
+          </button>
+        </div>
+
+        <div id="recentsBody" class="recents-body">
+          <div class="chat-search" id="chatSearchWrap" hidden>
+            <label class="sr-only" for="chatSearch">Search loaded chats</label>
+            <span class="chat-search-icon" aria-hidden="true" data-icon="search"></span>
+            <input id="chatSearch" type="search" placeholder="Search chats" autocomplete="off" aria-controls="chatList">
+            <button class="icon-button tiny" id="clearChatSearch" type="button" aria-label="Clear search" hidden>
+              <span data-icon="x"></span>
+            </button>
+          </div>
+          <div class="chat-list" id="chatList" role="list" aria-label="Chat list" aria-busy="true"></div>
+        </div>
+      </section>
+
+      <footer class="sidebar-foot">
+        <div class="sidebar-tools" aria-label="Quick actions">
+          <button class="icon-button" type="button" data-action="engine-show" aria-label="Open the separate arena.ai window" title="Open the arena.ai window">
+            <span data-icon="globe"></span>
+          </button>
+          <button class="icon-button" type="button" data-action="workspace-panel" aria-label="Show Workspace" title="Show Workspace">
+            <span data-icon="folder"></span>
+          </button>
+          <button class="icon-button" type="button" data-action="settings" aria-label="Settings" title="Settings">
+            <span data-icon="settings"></span>
+          </button>
+          <button class="icon-button" type="button" data-action="help" aria-label="Help and keyboard shortcuts" title="Help (F1)">
+            <span data-icon="help"></span>
+          </button>
+        </div>
+
+        <button class="account-button" id="accountButton" type="button" aria-label="Profile and sign-in status">
+          <span class="avatar" id="accountAvatar" aria-hidden="true">AP</span>
+          <span class="account-copy">
+            <span class="account-name" id="accountName">Checking sign-in…</span>
+            <span class="account-state" id="accountState">Local client</span>
+          </span>
+          <span class="account-dot" id="accountDot" aria-hidden="true"></span>
+        </button>
+
+        <nav class="sidebar-legal" aria-label="Arena documents">
+          <a href="https://help.arena.ai/articles/5629909088-terms-of-use" target="_blank" rel="noopener noreferrer">Terms of Use</a>
+          <a href="https://help.arena.ai/articles/3765052346-privacy-policy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
+          <a href="https://help.arena.ai/articles/1820405001-lmarena-cookie-policy" target="_blank" rel="noopener noreferrer">Cookies</a>
+        </nav>
+      </footer>
+      <div class="resize-handle resize-handle-sidebar" id="sidebarResize" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" title="Drag to resize. Double-click to reset." tabindex="0"></div>
+    </aside>
+
     <div class="sidebar-scrim" id="sidebarScrim" hidden></div>
 
     <div class="main-shell">
-      <header class="topbar" id="topbar">
-        <!-- Row 1: the frame. Order follows the sketch, left to right:
-             fold · repository · chats · logo + name · profile · settings ·
-             Discord · workspace folder. -->
-        <div class="topbar-row">
-          <!-- Left: fold, repository, chats. -->
-          <div class="topbar-edge topbar-edge-left">
-            <button class="icon-button rail-toggle" id="collapseSidebar" type="button"
-                    aria-label="Unfold the chats" aria-expanded="false" title="Unfold the chats">
-              <span data-icon="panel-left"></span>
-            </button>
-            <a class="icon-button topbar-icon topbar-repo" id="repoButton" href="https://github.com/Maxusimlive/Arena-Desktop"
-               target="_blank" rel="noopener noreferrer" aria-label="Repository" title="Repository">
-              <span data-icon="code"></span>
-            </a>
-            <button class="icon-button chats-drawer-button" id="chatsDrawerButton" type="button"
-                    aria-haspopup="dialog" aria-expanded="false" aria-label="All chats" title="All chats">
-              <span data-icon="message"></span>
-            </button>
-          </div>
-
-          <!-- Centre: logo and product name, truly centred in the bar. -->
-          <div class="topbar-center">
-            <div class="rail-brand" id="railBrand" aria-hidden="true">
-              <span class="brand-mark">
-                <svg viewBox="0 0 32 32" fill="none" focusable="false">
-                  <rect x="1.25" y="1.25" width="29.5" height="29.5" rx="9" stroke="currentColor" stroke-width="1.5"/>
-                  <path d="M16 7.5c.65 4.65 3.85 7.85 8.5 8.5-4.65.65-7.85 3.85-8.5 8.5-.65-4.65-3.85-7.85-8.5-8.5 4.65-.65 7.85-3.85 8.5-8.5Z" fill="currentColor"/>
-                </svg>
-              </span>
-              <span class="brand-name" id="railBrandName">Arena Desktop</span>
-            </div>
-          </div>
-
-          <!-- Chat drawer hangs from its own button; the click-away is handled
-               in script, so no overlay sits on top of the list. -->
-          <div class="chats-drawer-anchor" id="chatsDrawerAnchor">
-            <aside class="chats-drawer" id="chatsDrawer" aria-label="All chats" hidden>
-              <header class="chats-drawer-head">
-                <div class="chats-drawer-title">
-                  <span data-icon="clock"></span>
-                  <span>Chats</span>
-                </div>
-                <button class="icon-button tiny" id="chatsDrawerClose" type="button" aria-label="Close the chat list">
-                  <span data-icon="x"></span>
-                </button>
-              </header>
-              <nav class="chats-drawer-modes" aria-label="Modes">
-                <button class="nav-item" id="navArenaMode" type="button">
-                  <span data-icon="chart"></span><span>Arena mode</span>
-                </button>
-                <button class="nav-item" id="navGoogleMode" type="button">
-                  <span data-icon="spark"></span><span>Google AI mode</span>
-                </button>
-              </nav>
-              <div class="chat-search" id="chatSearchWrap" hidden>
-                <label class="sr-only" for="chatSearch">Search loaded chats</label>
-                <span class="chat-search-icon" aria-hidden="true" data-icon="search"></span>
-                <input id="chatSearch" type="search" placeholder="Search chats" autocomplete="off" aria-controls="chatList">
-                <button class="icon-button tiny" id="clearChatSearch" type="button" aria-label="Clear search" hidden>
-                  <span data-icon="x"></span>
-                </button>
-              </div>
-              <div id="recentsBody" class="recents-body">
-                <div class="chat-list" id="chatList" role="list" aria-label="Chat list" aria-busy="true"></div>
-              </div>
-              <footer class="chats-drawer-foot">
-                <nav class="sidebar-legal" aria-label="Arena documents">
-                  <a href="https://help.arena.ai/articles/5629909088-terms-of-use" target="_blank" rel="noopener noreferrer">Terms of Use</a>
-                  <a href="https://help.arena.ai/articles/3765052346-privacy-policy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
-                  <a href="https://help.arena.ai/articles/1820405001-lmarena-cookie-policy" target="_blank" rel="noopener noreferrer">Cookies</a>
-                </nav>
-              </footer>
-            </aside>
-          </div>
-
-          <!-- Right: profile, settings, Discord (unfolded), help, workspace. -->
-          <div class="topbar-edge topbar-edge-right">
-            <span class="demo-tag" id="demoChip" hidden title="Demo data and events">
-              <span class="demo-dot" aria-hidden="true"></span> DEMO
-            </span>
-            <button class="account-button topbar-account" id="accountButton" type="button" aria-label="Profile and sign-in status">
-              <span class="avatar" id="accountAvatar" aria-hidden="true">AP</span>
-              <span class="account-copy">
-                <span class="account-name" id="accountName">Checking sign-in…</span>
-                <span class="account-state" id="accountState">Local client</span>
-              </span>
-              <span class="account-dot" id="accountDot" aria-hidden="true"></span>
-              <span class="account-check" id="accountCheck" aria-hidden="true" hidden>✓</span>
-            </button>
-            <div class="account-popover" id="accountPopover" hidden></div>
-            <button class="icon-button account-gear" id="accountSettingsBtn" type="button" data-action="settings" aria-label="Settings" title="Settings">
-              <span data-icon="settings"></span>
-            </button>
-            <a class="icon-button topbar-icon topbar-discord" id="discordButton" href="https://discord.com/users/877543689428287489"
-               target="_blank" rel="noopener noreferrer" aria-label="Discord" title="Discord">
-              <span data-icon="discord"></span>
-            </a>
-            <button class="icon-button" type="button" data-action="help" aria-label="Help and keyboard shortcuts" title="Help (F1)">
-              <span data-icon="help"></span>
-            </button>
-            <button class="icon-button topbar-icon" id="workspaceArrowTop" type="button"
-                    aria-label="Toggle Workspace panel" aria-expanded="false" title="Workspace">
-              <span data-icon="folder"></span>
-            </button>
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-button mobile-menu" id="mobileMenuBtn" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false">
+            <span data-icon="menu"></span>
+          </button>
+          <div class="topbar-crumb">
+            <span class="eyebrow">Arena Desktop</span>
+            <span class="crumb-title" id="topbarTitle">Home</span>
           </div>
         </div>
 
-        <!-- Row 2: only when unfolded. Chats ride outward from New chat. -->
-        <div class="topbar-rail" id="railStrip">
-          <div class="rail-side rail-side-left" id="railLeft" aria-hidden="true"></div>
-          <button class="rail-new-chat" id="railNewChat" type="button" title="New chat (Ctrl+N)">
-            <span data-icon="plus"></span>
-            <span class="rail-new-chat-label">New chat</span>
+        <div class="topbar-actions">
+          <span class="demo-tag" id="demoChip" hidden title="Demo data and events">
+            <span class="demo-dot" aria-hidden="true"></span> DEMO
+          </span>
+          <button class="button button-quiet" type="button" id="workspacePanelTopButton" data-action="workspace-panel" aria-pressed="false">
+            <span data-icon="panel-right"></span>
+            <span class="button-label">Workspace</span>
           </button>
-          <div class="rail-side rail-side-right" id="railRight" aria-hidden="true"></div>
+          <button class="button button-quiet topbar-engine" type="button" id="engineTopButton" data-action="engine-show">
+            <span data-icon="panel-right"></span>
+            <span class="button-label">arena.ai window</span>
+          </button>
+          <button class="icon-button" type="button" data-action="help" aria-label="Help and keyboard shortcuts" title="Help (F1)">
+            <span data-icon="help"></span>
+          </button>
         </div>
       </header>
-
-      <!-- Chat drawer: the full list, modes and legal links, opened from the toolbar -->
 
       <div class="system-banner" id="connectionBanner" role="alert" hidden>
         <span class="banner-icon" data-icon="wifi-off"></span>
@@ -235,6 +244,11 @@
                 <span data-icon="plus"></span>
               </button>
               <input type="file" id="fileInput" multiple hidden aria-hidden="true" tabindex="-1">
+              <button class="composer-chip" type="button" id="workspaceButton" aria-haspopup="listbox" aria-expanded="false" aria-label="Workspace">
+                <span data-icon="folder"></span>
+                <span class="chip-label" id="workspaceLabel">No folder selected</span>
+                <span data-icon="chevron-down" class="chip-chevron"></span>
+              </button>
               <button class="composer-chip modality-chip" type="button" id="modalityButton" aria-haspopup="listbox" aria-expanded="false" aria-label="Work type">
                 <span data-icon="spark"></span>
                 <span class="chip-label" id="modalityLabel">Auto</span>
@@ -245,13 +259,30 @@
                 <span class="chip-label" id="modeLabel">Battle Mode</span>
                 <span data-icon="chevron-down" class="chip-chevron"></span>
               </button>
-              <div class="toolbar-spacer" id="toolbarSpacer"></div>
-              <div class="model-chips" id="modelChips"></div>
-              <button class="composer-chip agent-integration-chip" type="button" id="agentIntegrationButton" aria-haspopup="dialog" aria-expanded="false" aria-label="Agent integration">
-                <span data-icon="plug"></span>
-                <span class="chip-label">Agent integration</span>
+              <span class="toolbar-divider" aria-hidden="true"></span>
+              <button class="composer-chip permission-chip" type="button" id="permissionButton" aria-haspopup="listbox" aria-expanded="false">
+                <span data-icon="shield"></span>
+                <span class="chip-label" id="permissionLabel">Ask</span>
+                <span data-icon="chevron-down" class="chip-chevron"></span>
+              </button>
+              <label class="composer-chip agent-direct-chip" id="workspaceSyncChip" title="Workspace Sync: connect this chat to the folder selected on this computer">
+                <span class="chip-label">Workspace Sync</span>
+                <span class="switch">
+                  <input type="checkbox" class="switch-input" id="workspaceSyncToggle" aria-label="Workspace Sync: allow the models to work in the folder selected on this computer">
+                  <span class="switch-track" aria-hidden="true"></span>
+                </span>
+              </label>
+              <button class="composer-chip compact-chip" type="button" id="compactButton" hidden title="Compact: continue this chat in a fresh Arena session with a summary">
+                <span data-icon="compress"></span>
+                <span class="chip-label">Compact</span>
+                <span class="compact-dot" id="compactDot" hidden aria-hidden="true"></span>
+              </button>
+              <button class="composer-chip gateway-chip" type="button" id="gatewayChip" hidden title="Agent Gateway is ON">
+                <span data-icon="globe"></span>
+                <span class="chip-label">Gateway on</span>
               </button>
               <span class="pending-permissions-badge" id="pendingPermissionsBadge" hidden></span>
+              <div class="toolbar-spacer"></div>
               <button class="stop-button" type="button" id="stopButton" hidden>
                 <span data-icon="stop"></span>
                 <span>Stop</span>
@@ -265,8 +296,8 @@
       </main>
     </div>
 
-    <aside class="workspace-panel" id="workspacePanel" aria-labelledby="workspacePanelTitle">
-      <div class="workspace-resize-corner" id="workspaceResizeCorner" role="separator" aria-label="Resize Workspace window" title="Drag to resize"></div>
+    <aside class="workspace-panel" id="workspacePanel" aria-labelledby="workspacePanelTitle" hidden>
+      <div class="resize-handle resize-handle-workspace" id="workspaceResize" role="separator" aria-orientation="vertical" aria-label="Resize Workspace panel" title="Drag to resize. Double-click to reset." tabindex="0"></div>
       <section class="workspace-card" aria-label="Workspace files">
         <header class="workspace-panel-head">
           <div class="workspace-panel-title-wrap">
@@ -274,6 +305,20 @@
               <h2 id="workspacePanelTitle">Workspace</h2>
               <p id="workspacePanelRoot">Loading folder…</p>
             </div>
+          </div>
+          <div class="workspace-panel-actions" aria-label="Workspace actions">
+            <button class="icon-button" type="button" data-action="workspace" aria-label="Choose workspace" title="Choose folder">
+              <span data-icon="folder"></span>
+            </button>
+            <button class="icon-button" id="workspaceOpenButton" type="button" aria-label="Open folder in Explorer" title="Open in Explorer">
+              <span data-icon="external"></span>
+            </button>
+            <button class="icon-button" id="workspaceRefreshButton" type="button" aria-label="Refresh the file tree" title="Refresh">
+              <span data-icon="refresh"></span>
+            </button>
+            <button class="icon-button" type="button" id="workspacePanelClose" data-action="workspace-panel-close" aria-label="Hide Workspace" title="Hide panel">
+              <span data-icon="x"></span>
+            </button>
           </div>
         </header>
         <div class="workspace-tabs" role="tablist" aria-label="Workspace views">
@@ -292,6 +337,27 @@
         </section>
       </section>
 
+      <div class="resize-handle resize-handle-split" id="workspaceSplitResize" role="separator" aria-orientation="horizontal" aria-label="Resize Connectors section" title="Drag to resize. Double-click to reset." tabindex="0"></div>
+
+      <section class="connectors-pane" id="connectorsPane" aria-labelledby="connectorsTitle">
+        <header class="connectors-head">
+          <div class="connectors-copy">
+            <h2 id="connectorsTitle">Connectors</h2>
+          </div>
+          <button class="button button-small add-connector-button" id="addConnectorButton" type="button" aria-label="Add a connector or MCP server" title="Add a connector or MCP server">
+            <span data-icon="plus"></span><span>Add</span>
+          </button>
+        </header>
+        <div class="connector-list" id="connectorList"></div>
+        <div class="connectors-foot">
+          <button class="button button-small button-quiet" id="openMcpJsonButton" type="button">
+            <span data-icon="braces"></span><span>MCP JSON</span>
+          </button>
+          <button class="icon-button" id="reloadConnectorsButton" type="button" aria-label="Refresh connector list" title="Refresh: Arena list and mcp.json">
+            <span data-icon="refresh"></span>
+          </button>
+        </div>
+      </section>
     </aside>
 
     <aside class="dock-pane" id="dockPane" aria-labelledby="dockTitle" hidden>
@@ -340,41 +406,6 @@
     <div class="noscript-message">Arena Desktop needs JavaScript. Enable it in the WebView2 settings.</div>
   </noscript>
 
-  <script>
-    // A script that fails to parse leaves the window looking loaded while it
-    // does nothing — no requests, no reaction, indistinguishable from a freeze.
-    // This watchdog is plain ES5 so it runs even on an old runtime, and it says
-    // what happened instead of showing a silent empty window.
-    (function () {
-      window.__arenaBootState = { booted: false };
-      var said = false;
-      function report(why) {
-        if (said || window.__arenaDesktopApp) return;
-        said = true;
-        try {
-          var box = document.createElement('div');
-          box.setAttribute('style', 'position:fixed;inset:0;z-index:99999;display:flex;' +
-            'align-items:center;justify-content:center;padding:32px;background:#242422;' +
-            'color:#f2f2ef;font:15px/1.6 system-ui,Segoe UI,sans-serif;text-align:center');
-          box.innerHTML = '<div style="max-width:620px">' +
-            '<div style="font-size:19px;font-weight:600;margin-bottom:12px">' +
-            'The interface could not start</div>' +
-            '<div style="opacity:.85">' + why + '</div>' +
-            '<div style="opacity:.6;margin-top:14px;font-size:13px">' +
-            'This window is shown by the Microsoft Edge WebView2 Runtime. ' +
-            'Update it (Windows Update, or the WebView2 Runtime installer from Microsoft) ' +
-            'and start Arena Desktop again.</div></div>';
-          (document.body || document.documentElement).appendChild(box);
-        } catch (e) { /* nothing else can be done here */ }
-      }
-      window.addEventListener('error', function (e) {
-        if (e && e.message) report('Script error: ' + e.message);
-      }, true);
-      setTimeout(function () {
-        if (!window.__arenaDesktopApp) report('The interface script did not run.');
-      }, 12000);
-    })();
-  </script>
   <script src="/static/app.js?v=6.0.0" defer onerror="this.onerror=null;this.src='static/app.js?v=6.0.0'"></script>
 </body>
 </html>

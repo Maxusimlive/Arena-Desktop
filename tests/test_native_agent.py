@@ -27,15 +27,11 @@ def test_append_body_and_urls():
     assert payload["message"]["parts"][0]["text"] == "next"
     assert payload["metadata"]["enabledConnectors"] == ["notion"]
     assert payload["metadata"]["clientPlatform"] == "web"
-    # Arena's current transport: cookies only, /api/chat/:id/{events,input}.
-    assert na.chat_events_url("https://arena.ai", "addr 1").endswith("/api/chat/addr%201/events")
-    assert na.chat_input_url("https://arena.ai/", "a").endswith("/api/chat/a/input")
-    assert na.chat_session_path("a b") == "/api/chat/a%20b/session"
+    assert na.out_url("https://arena.ai", "addr 1").endswith(
+        "/ai-proxy/realtime/v1/sessions/addr%201/out")
+    assert na.in_url("https://arena.ai/", "a").endswith("/sessions/a/in/append")
     headers = na.append_headers("pat")
-    assert "Authorization" not in headers and "x-trigger-source" not in headers
-    assert headers["X-Part-Id"]
-    stream = na.stream_headers("pat", "42")
-    assert "Authorization" not in stream and stream["Last-Event-ID"] == "42"
+    assert headers["Authorization"] == "Bearer pat" and headers["X-Part-Id"]
     assert na.STOP_BODY == {"kind": "stop"}
 
 
@@ -446,47 +442,3 @@ def test_history_import_carries_voice_input_to_settled_result():
 
     pending_only = history_sync.agentic_messages({"messages": [session["messages"][0]]})
     assert pending_only == []
-
-
-def _jwt(claims):
-    import base64
-    def part(obj):
-        raw = base64.urlsafe_b64encode(json.dumps(obj).encode()).decode()
-        return raw.rstrip("=")
-    return f"{part({'alg': 'RS256'})}.{part(claims)}.{'x' * 32}"
-
-
-def test_find_pat_prefers_session_tokens_and_rejects_decoys():
-    good = _jwt({"sub": "u", "scopes": {"read": {"sessions": "s1"}, "write": {"sessions": "s1"}}})
-    decoy = _jwt({"sub": "u", "scopes": {"read": {"runs": "r1"}}})
-    payload = {
-        "id": "s1",
-        "bootstrap": {"triggerAddress": "addr-7"},
-        "authToken": decoy,
-        "publicAccessToken": good,
-    }
-    assert na.find_pat(payload) == good
-    assert na.find_trigger_address(payload) == "addr-7"
-    assert na.coordinates(payload) == ("addr-7", good)
-    # A rollup without any session token must not invent one.
-    assert na.find_pat({"id": "s1", "bootstrap": {"triggerAddress": "addr-7"}}) is None
-    # An unrelated JWT under a token-ish key is not a session token.
-    assert na.find_pat({"authToken": decoy}) is None
-
-
-def test_parse_bootstrap_reads_nested_token_and_keeps_canonical_fields():
-    good = _jwt({"scopes": {"read": {"sessions": "s1"}}})
-    nested = {"id": "s1", "bootstrap": {"sessionId": "s1", "taskId": "chat-agent",
-                                        "trigger": {"triggerAddress": "addr-3",
-                                                    "publicAccessToken": good}}}
-    boot = na.parse_bootstrap(nested)
-    assert boot["session_id"] == "s1" and boot["task_id"] == "chat-agent"
-    assert boot["trigger_address"] == "addr-3" and boot["pat"] == good
-
-
-def test_out_url_candidates_start_with_the_chat_events_route():
-    urls = na.out_url_candidates("https://arena.ai", "addr-1")
-    assert urls[0] == "https://arena.ai/api/chat/addr-1/events"
-    assert urls[1] == na.out_url("https://arena.ai", "addr-1")  # legacy fallback
-    assert "https://arena.ai/ai-proxy/realtime/v2/sessions/addr-1/out" in urls
-    assert len(urls) == len(set(urls))

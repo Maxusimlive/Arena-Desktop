@@ -865,9 +865,7 @@ class BrowserEngine:
         if self.challenge == "recaptcha":
             self.challenge = None
         self.login_open = False
-        t = threading.Timer(0.08, self.hide)
-        t.daemon = True
-        t.start()
+        threading.Thread(target=self.hide, daemon=True).start()
 
     def _after_load(self):
         try:

@@ -513,9 +513,6 @@ class GoogleEngine:
             if diag is not None: diag.note("[google-window] show: нет окна")
             return
         self.visible = True
-        if self.shown_once():
-            LOG.info("[google-window] show: already on screen")
-            return
         box: dict = {}
         done = threading.Event()
         if diag is not None: diag.note("[google-window] show: начало")

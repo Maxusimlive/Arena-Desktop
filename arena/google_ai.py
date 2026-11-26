@@ -1701,7 +1701,10 @@ class GoogleEngine:
         person may still be looking at it.
         """
         window = self.window
-        if window is None or getattr(window, "ephemeral", False) is not True:
+        if window is None:
+            return
+        if getattr(window, "ephemeral", False) is not True:
+            self.hide()
             return
         LOG.info("[google-window] the single-use window has done its job; closing it")
         try:

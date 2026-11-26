@@ -6745,7 +6745,7 @@ You can start with a more structured option: one script, short captions, and a c
         const checkEl = els.accountCheck || document.getElementById('accountCheck');
         els.accountButton.classList.toggle('is-signed-in', googleDone);
         els.accountButton.classList.toggle('is-expired', !googleDone && g.expired);
-        els.accountButton.hidden = Boolean(googleDone && !arenaDone);
+        els.accountButton.hidden = false;
         if (googleDone && els.accountPopover) {
           els.accountPopover.hidden = true;
         }

@@ -941,16 +941,14 @@ class BrowserEngine:
 
     def hide(self):
         self.visible = False
-        if self.window:
-            try:
-                self.window.on_top = False
-            except Exception:
-                pass
         dock = getattr(self, "dock", None)
         if dock is not None and dock.visible:
             dock.hide()
         elif self.window:
-            self.window.hide()
+            try:
+                self.window.hide()
+            except Exception:
+                pass
 
     def open_login(self):
         self.login_open = True

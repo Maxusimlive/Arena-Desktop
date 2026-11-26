@@ -9256,10 +9256,37 @@ def _google_track_stream(chat_id, message):
                             "message": (http_error.message if http_error else ""),
                             "window": True})
                 has_window = False
-            elif has_window and code in ("human_check", "throttled"):
+            elif has_window and code == "throttled":
+                # Plain HTTP hit Google's JS interstitial, which a real WebView
+                # solves automatically! Ask directly through the Google WebView
+                # and return the rendered AI Mode answer seamlessly.
+                yield _sse({"type": "agent", "stage": "Google AI mode (WebView)…"})
+                try:
+                    w_res = engine.ask(effective, hl=hl, timeout=45.0)
+                except Exception as exc:
+                    LOG.info("google webview fallback failed: %s", exc)
+                    w_res = None
+                w_text = ""
+                if isinstance(w_res, dict):
+                    w_text = str(w_res.get("text") or w_res.get("answer") or "").strip()
+                elif isinstance(w_res, str):
+                    w_text = w_res.strip()
+                if w_text:
+                    answer = w_text
+                    yield _sse({"type": "text", "text": answer, "model": "a"})
+                    window_sent = True
+                else:
+                    engine.load(engine.search_url(effective, hl))
+                    engine.show()
+                    yield _sse({"type": "error", "code": code,
+                                "message": (http_error.message if http_error else "")
+                                           + " The Google window is open on that page.",
+                                "window": True})
+                has_window = False
+            elif has_window and code == "human_check":
                 # Only a person can clear this: put the page in front of them
                 # instead of waiting for an answer that will not come.
-                engine.load(engine.search_url(message, hl))
+                engine.load(engine.search_url(effective, hl))
                 engine.show()
                 yield _sse({"type": "error", "code": code,
                             "message": (http_error.message if http_error else "")

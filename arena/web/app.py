@@ -9196,6 +9196,14 @@ def _google_track_stream(chat_id, message):
         else:
             yield _sse({"type": "agent", "stage": "Google AI mode is writing…"})
             effective = _google_compose_query(message, messages[:-1], hl)
+            if bool(_google_scope().get("agent_integration")):
+                supervisor_prefix = (
+                    "[Supervisor Mode] You are acting as the Supervisor AI inside Arena Desktop. "
+                    "You oversee the user's local workspace and can plan, review, and give clear "
+                    "step-by-step instructions or commands for the local agent to execute. "
+                    "Respond concisely and directly to the user's request.\n\n"
+                )
+                effective = supervisor_prefix + effective
             # A turn must never be able to sit here forever: the browser shows
             # a spinning card until *something* arrives, so the wait is bounded
             # and its expiry is reported like any other Google error.

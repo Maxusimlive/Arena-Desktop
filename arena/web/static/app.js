@@ -4489,8 +4489,18 @@ You can start with a more structured option: one script, short captions, and a c
     return wrap;
   }
 
+  function cleanUserDisplayText(raw) {
+    let txt = String(raw || '');
+    // Strip injected Arena Desktop / gateway / supervisor instruction blocks
+    txt = txt.replace(/^\[Arena Desktop[^\]]*\][\s\S]*?(?:\n{2,}|$)/i, '');
+    txt = txt.replace(/^The user is chatting in Arena Desktop[\s\S]*?(?:User message:\s*|---\s*\n+)/i, '');
+    txt = txt.replace(/^\[Supervisor[^\]]*\][\s\S]*?(?:\n{2,}|$)/i, '');
+    return txt.trim() || String(raw || '');
+  }
+
   function userMessageNode(message) {
     const createdAt = message?.created_at || message?.createdAt || message?.timestamp;
+    const rawText = textValue(message?.content ?? message?.text ?? message?.message ?? '');
     return el('article', { class: 'message message-user' },
       el('div', { class: 'user-bubble' },
         el('div', { class: 'user-meta' },
@@ -4498,7 +4508,7 @@ You can start with a more structured option: one script, short captions, and a c
           createdAt ? el('time', { text: formatClock(createdAt), datetime: String(createdAt) }) : null
         ),
         userAttachmentsNode(message),
-        el('div', { class: 'user-text', text: textValue(message?.content ?? message?.text ?? message?.message ?? '') })
+        el('div', { class: 'user-text', text: cleanUserDisplayText(rawText) })
       )
     );
   }
@@ -4861,16 +4871,42 @@ You can start with a more structured option: one script, short captions, and a c
     return text.replace(/\n{3,}/g, '\n\n');
   }
 
+  function formatElapsedCompact(ms) {
+    const totalSec = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+    if (totalSec < 1) return '< 1s';
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+
+  function formatRelativeAgo(ts) {
+    if (!ts) return '';
+    const t = typeof ts === 'number' ? (ts < 1e12 ? ts * 1000 : ts) : Date.parse(String(ts));
+    if (!Number.isFinite(t)) return '';
+    const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (sec < 60) return 'just now';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return min === 1 ? '1 minute ago' : `${min} minutes ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return hr === 1 ? '1 hour ago' : `${hr} hours ago`;
+    const days = Math.floor(hr / 24);
+    return days === 1 ? '1 day ago' : `${days} days ago`;
+  }
+
   function answerFootNote(lane) {
     if (lane.streaming) return null;
     if (!lane.done && !lane.error) return null;
-    const bits = [];
-    if (lane.stopped) bits.push("Stopped");
-    else if (lane.error) bits.push("Completed with errors");
-    else bits.push(lane.demo ? "Demo response" : "Response received");
-    const visibleLength = visibleLaneText(lane).trim().length;
-    if (visibleLength) bits.push(`${visibleLength.toLocaleString('en-US')} symb.`);
-    return el('div', { class: 'answer-footnote' }, el('span', { class: 'status-dot is-online' }), el('span', { text: bits.join(' · ') }));
+    const parts = [];
+    const elapsedMs = lane.elapsedMs ?? lane.durationMs ?? (
+      lane.startedAt && lane.completedAt ? (lane.completedAt - lane.startedAt) : null
+    );
+    if (elapsedMs != null && Number.isFinite(Number(elapsedMs))) {
+      parts.push(formatElapsedCompact(elapsedMs));
+    }
+    const ago = formatRelativeAgo(lane.completedAt || lane.createdAt || lane.timestamp);
+    if (ago) parts.push(ago);
+    if (!parts.length) return null;
+    return el('div', { class: 'answer-footnote' }, el('span', { text: parts.join(' | ') }));
   }
 
   function renderAssistantLane(lane, turn, key, totalLanes, uiKey = '') {
@@ -4891,6 +4927,10 @@ You can start with a more structured option: one script, short captions, and a c
     // have arrived so far.  Otherwise the first Agent/tool text renders at
     // the top and then visibly jumps below the timeline on the next event.
     // The Summary styling/jump still require an actual timeline.
+    if (!lane.streaming && !visibleText.trim() && !hasWorkTimeline && !lane.error && !lane.stopped
+        && !(Array.isArray(lane.media) && lane.media.length)) {
+      return el('div', { class: 'empty-lane-skip', hidden: true });
+    }
     const turnMode = validMode(turn.mode) || state.mode;
     const expectedWorkTimeline = turnMode === 'agent' || Boolean(turn.toolsEnabled);
     const deferTextToEnd = hasWorkTimeline || expectedWorkTimeline;
@@ -4985,9 +5025,6 @@ You can start with a more structured option: one script, short captions, and a c
     // below from the first token, before any timeline block exists.
     if (!deferTextToEnd) card.appendChild(markdown);
 
-    if (turn.round && turn.round > 1) {
-      card.appendChild(el('div', { class: 'agent-steps' }, el('span', { class: 'agent-step' }, el('span', { class: 'status-dot is-online' }), el('span', { text: `Round ${turn.round}` }))));
-    }
     if (Array.isArray(lane.agentStages) && lane.agentStages.length) {
       card.appendChild(el('div', { class: 'agent-steps' }, lane.agentStages.slice(-5).map((stage) => el('span', { class: 'agent-step' }, iconEl('spark'), el('span', { text: stage })))));
     }
@@ -5714,12 +5751,6 @@ You can start with a more structured option: one script, short captions, and a c
         iconEl('refresh'), el('span', { text: 'Undo file changes' }));
       undo.addEventListener('click', () => { void undoTurnChanges(turn, undo); });
       row.appendChild(undo);
-    }
-    if (turn.msgEnd != null) {
-      const fork = el('button', { class: 'button button-small button-quiet', type: 'button', title: 'Continue from here in a new chat' },
-        iconEl('git-branch'), el('span', { text: 'Fork from here' }));
-      fork.addEventListener('click', () => { void forkFromTurn(turn); });
-      row.appendChild(fork);
     }
     return row;
   }

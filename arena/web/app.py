@@ -9196,14 +9196,14 @@ def _google_track_stream(chat_id, message):
         else:
             yield _sse({"type": "agent", "stage": "Google AI mode is writing…"})
             effective = _google_compose_query(message, messages[:-1], hl)
-            if bool(_google_scope().get("agent_integration")):
-                supervisor_prefix = (
-                    "[Supervisor Mode] You are acting as the Supervisor AI inside Arena Desktop. "
-                    "You oversee the user's local workspace and can plan, review, and give clear "
-                    "step-by-step instructions or commands for the local agent to execute. "
-                    "Respond concisely and directly to the user's request.\n\n"
-                )
-                effective = supervisor_prefix + effective
+            agent_on = bool(prefs.get("supervisor"))
+            if agent_on:
+                try:
+                    ws = _active_workspace_dir()
+                    sys_prompt = agent.build_system_prompt(ws)
+                    effective = sys_prompt + "\n\nUser request:\n" + effective
+                except Exception:
+                    pass
             # A turn must never be able to sit here forever: the browser shows
             # a spinning card until *something* arrives, so the wait is bounded
             # and its expiry is reported like any other Google error.
@@ -9287,39 +9287,43 @@ def _google_track_stream(chat_id, message):
 
         # Supervisor mode: the answer above is the plan, and an Arena Agent chat
         # carries it out. Google stays the planner; the executor only follows
-        # the brief and asks back when it lacks material.
-        supervisor_id = ""
-        if answer and prefs.get("supervisor"):
-            arena_client = get_client()
-            if not _signed_in_somewhere(arena_client):
-                yield _sse({"type": "notice", "level": "warn",
-                            "text": "Superviser integration is on, but no Arena account is "
-                                    "signed in — the plan was not executed. Sign in to Arena "
-                                    "or turn the switch off."})
-            else:
-                planner = _google_http_client(hl=hl)
-                yield _sse({"type": "agent", "stage": "Supervisor: Arena Agent is executing the plan…"})
+        # Local agent integration loop (same tool-calling loop as Direct mode).
+        if answer and prefs.get("supervisor") and client is not None:
+            ws = _active_workspace_dir()
+            for _round in range(1, 7):
+                calls = agent.parse_tool_calls(answer)
+                if not calls:
+                    break
+                results_text = []
+                for call in calls:
+                    tool_name = call.get("tool") or ""
+                    tool_args = call.get("args") or {}
+                    yield _sse({"type": "tool_call", "tool": tool_name, "args": tool_args, "model": "a"})
+                    try:
+                        out = agent.execute_tool(tool_name, tool_args, ws)
+                        ok = True
+                    except Exception as exc:
+                        out = f"Error: {exc}"
+                        ok = False
+                    yield _sse({"type": "tool_result", "tool": tool_name, "ok": ok,
+                                "output": str(out)[:2000], "model": "a"})
+                    results_text.append(f"[Tool {tool_name} result]\n{out}")
+                followup_q = "\n\n".join(results_text) + "\n\nContinue and answer the user."
                 try:
-                    report, supervisor_id = yield from _supervisor_run(
-                        arena_client, chat_id, title or "", message, answer,
-                        prefs.get("supervisor_steps") or 6, planner,
-                        ru=str(hl).lower().startswith("ru"))
-                except Exception as exc:
-                    LOG.exception("supervisor run failed")
-                    yield _sse({"type": "error", "code": "supervisor_failed",
-                                "message": f"The supervisor run failed: {type(exc).__name__}: {exc}"})
-                    report, supervisor_id = "", ""
-                if report:
-                    answer = (answer + "\n\n---\n\n**Superviser · Arena Agent**\n\n"
-                              + report)
-                    yield _sse({"type": "text", "text": answer, "model": "a"})
+                    next_res = _google_ask_with_deadline(client, followup_q)
+                    next_ans = next_res.get("text") or ""
+                    if next_ans:
+                        answer = next_ans
+                        yield _sse({"type": "text", "text": answer, "model": "a"})
+                    else:
+                        break
+                except Exception:
+                    break
 
         if answer:
             assistant = {"role": "assistant", "text": answer}
             if sources:
                 assistant["sources"] = sources
-            if supervisor_id:
-                assistant["supervisor_chat"] = supervisor_id
             messages.append(assistant)
             try:
                 _save_chat(chat_id, title=title, messages=messages, mode="direct",
@@ -9327,8 +9331,7 @@ def _google_track_stream(chat_id, message):
             except Exception:
                 LOG.exception("google chat save failed")
         yield _sse({"type": "done", "text_a": answer, "text_b": "", "dual": False,
-                    "chat_id": chat_id, "google": True, "sources": sources,
-                    "supervisor_chat": supervisor_id})
+                    "chat_id": chat_id, "google": True, "sources": sources})
 
     return Response(
         stream_with_context(_sse_wrap(generate(), chat_id=chat_id)),
@@ -9596,7 +9599,11 @@ def api_google_open():
     elif data.get("hide"):
         engine.hide()
     else:
-        engine.show()
+        url = (engine.page_url() or "").strip()
+        if not url or url == "about:blank":
+            engine.open_url("https://www.google.com/search?udm=50")
+        else:
+            engine.show()
     return jsonify({"ok": True, "state": engine.state()})
 
 

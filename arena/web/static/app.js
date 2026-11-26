@@ -3699,8 +3699,8 @@ You can start with a more structured option: one script, short captions, and a c
     const integrationChip = els.agentIntegrationButton;
     if (integrationChip) {
       const label = integrationChip.querySelector('.chip-label');
-      if (label) label.textContent = next === 'google' ? 'Superviser integration' : 'Agent integration';
-      integrationChip.setAttribute('aria-label', next === 'google' ? 'Superviser integration' : 'Agent integration');
+      if (label) label.textContent = next === 'google' ? 'Agent integration' : 'Agent integration';
+      integrationChip.setAttribute('aria-label', next === 'google' ? 'Agent integration' : 'Agent integration');
     }
     const copy = TRACK_COPY[next];
     const titleNode = document.getElementById('welcomeTitle');
@@ -4486,11 +4486,11 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   function cleanUserDisplayText(raw) {
-    let txt = String(raw || '');
-    // Strip injected Arena Desktop / gateway / supervisor instruction blocks
-    txt = txt.replace(/^\[Arena Desktop[^\]]*\][\s\S]*?(?:\n{2,}|$)/i, '');
+    let txt = String(raw || '').trim();
+    // Strip injected Arena Desktop / sub-agents / gateway / supervisor instruction blocks
+    txt = txt.replace(/\[Arena Desktop[^\]]*\][\s\S]*?(?:Private handle:\s*\S+\s*\n+|\n{2,})/gi, '');
     txt = txt.replace(/^The user is chatting in Arena Desktop[\s\S]*?(?:User message:\s*|---\s*\n+)/i, '');
-    txt = txt.replace(/^\[Supervisor[^\]]*\][\s\S]*?(?:\n{2,}|$)/i, '');
+    txt = txt.replace(/\[Supervisor[^\]]*\][\s\S]*?(?:\n{2,}|$)/gi, '');
     return txt.trim() || String(raw || '');
   }
 
@@ -4923,6 +4923,10 @@ You can start with a more structured option: one script, short captions, and a c
     // have arrived so far.  Otherwise the first Agent/tool text renders at
     // the top and then visibly jumps below the timeline on the next event.
     // The Summary styling/jump still require an actual timeline.
+    if (!lane.streaming && !lane.modelName && !visibleText.trim() && !hasWorkTimeline
+        && !lane.error && !lane.stopped && !(Array.isArray(lane.media) && lane.media.length)) {
+      return el('div', { class: 'empty-lane-skip', hidden: true });
+    }
     const turnMode = validMode(turn.mode) || state.mode;
     const expectedWorkTimeline = turnMode === 'agent' || Boolean(turn.toolsEnabled);
     const deferTextToEnd = hasWorkTimeline || expectedWorkTimeline;
@@ -9105,12 +9109,12 @@ You can start with a more structured option: one script, short captions, and a c
       // --- Master toggle ---
       if (supervisorTrack) {
         host.appendChild(toggleRow(
-          'Superviser integration',
+          'Agent integration',
           integrationOn
             ? 'On — Google AI mode writes the plan, an Arena Agent chat carries it out'
             : 'Off — Google AI mode answers with text only; nothing runs on this computer',
           integrationOn,
-          'Superviser integration',
+          'Agent integration',
           async (input) => {
             const on = Boolean(input.checked);
             state.google = { ...(state.google || {}),
@@ -9118,12 +9122,12 @@ You can start with a more structured option: one script, short captions, and a c
             try {
               await API.saveGooglePrefs({ supervisor: on });
             } catch (error) {
-              toast(errorMessage(error), 'error', 'Superviser integration');
+              toast(errorMessage(error), 'error', 'Agent integration');
             }
             toast(on
-              ? 'Superviser integration is on: Google plans, Arena Agent executes.'
-              : 'Superviser integration is off: Google AI mode only answers.',
-              'info', 'Superviser integration');
+              ? 'Agent integration is on: Google AI mode can run local workspace tools.'
+              : 'Agent integration is off: Google AI mode only answers.',
+              'info', 'Agent integration');
             void fill();
           }
         ));
@@ -9336,7 +9340,7 @@ You can start with a more structured option: one script, short captions, and a c
     };
 
     mountModal({
-      title: supervisorTrack ? 'Superviser integration' : 'Agent integration',
+      title: supervisorTrack ? 'Agent integration' : 'Agent integration',
       subtitle: supervisorTrack
         ? 'Google AI mode plans; an Arena Agent chat executes in this workspace'
         : 'Workspace and computer integration for Agent chats',
@@ -11599,7 +11603,7 @@ You can start with a more structured option: one script, short captions, and a c
           state.google = { ...state.google, prefs: res?.prefs || state.google.prefs };
         } catch (error) { toast(errorMessage(error), 'error', 'Superviser'); }
       };
-      wrap.appendChild(el('h3', { class: 'settings-h', text: 'Superviser integration' }));
+      wrap.appendChild(el('h3', { class: 'settings-h', text: 'Agent integration' }));
       wrap.appendChild(el('p', { class: 'setting-desc', text:
         'Google AI mode writes the plan. An Arena Agent chat carries it out in your folder, '
         + 'without improvising, and asks back with ASK: when only the planner can supply '
@@ -11839,9 +11843,9 @@ You can start with a more structured option: one script, short captions, and a c
         prefs.show_window, 'show_window'));
 
       // ================================================================
-      // Superviser integration — Google plans, an Arena chat executes.
+      // Agent integration — Google plans, an Arena chat executes.
       // ================================================================
-      wrap.appendChild(el('h3', { class: 'settings-h', text: 'Superviser integration' }));
+      wrap.appendChild(el('h3', { class: 'settings-h', text: 'Agent integration' }));
       wrap.appendChild(toggleRow('Google plans, Arena Agent executes',
         'Google writes the plan; an Arena Agent chat carries it out in your folder and asks back '
         + 'when only the planner can supply material',

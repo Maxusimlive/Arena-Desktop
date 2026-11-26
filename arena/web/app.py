@@ -6619,7 +6619,7 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
             break
         try:
             resp = requests.get(
-                _native_out_url(trigger_address),
+                _native_out_url(session_id or trigger_address),
                 headers=_native_headers(client, native_agent.stream_headers(pat, last_event_id)),
                 stream=True, timeout=(15, 150))
         except requests.RequestException:

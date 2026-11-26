@@ -468,6 +468,7 @@ def stream_headers(pat: str = None, last_event_id=None) -> dict:
     headers = {
         "Accept": "text/event-stream",
         "Timeout-Seconds": "120",
+        "X-Peek-Settled": "1",
     }
     # No Authorization: Arena's proxy owns the token now and the website
     # deletes the header before sending. Cookies are the credential.

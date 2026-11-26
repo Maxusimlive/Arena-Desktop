@@ -381,6 +381,9 @@ _VOTE_JS = r"""
     try { token = await mintToken(); } catch (e) { trace.push('mint_outer=' + String(e).slice(0, 60)); }
     var args = {};
     for (var k in opts.args) args[k] = opts.args[k];
+    if (args.didInspectBothMobileHorizontalResponses === undefined) {
+      args.didInspectBothMobileHorizontalResponses = false;
+    }
     args.recaptchaV3Token = token || null;
     try {
       var res = await window.__arenaVote(args);

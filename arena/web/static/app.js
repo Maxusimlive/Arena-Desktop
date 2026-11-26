@@ -3588,10 +3588,6 @@ You can start with a more structured option: one script, short captions, and a c
   }
 
   async function googleSignIn() {
-    if (googleSignedIn()) {
-      updateAccountUI();
-      return;
-    }
     try {
       await API.googleSignIn();
       toast('Sign in inside the Google window. It closes by itself once Google confirms the session.',
@@ -4927,10 +4923,6 @@ You can start with a more structured option: one script, short captions, and a c
     // have arrived so far.  Otherwise the first Agent/tool text renders at
     // the top and then visibly jumps below the timeline on the next event.
     // The Summary styling/jump still require an actual timeline.
-    if (!lane.streaming && !visibleText.trim() && !hasWorkTimeline && !lane.error && !lane.stopped
-        && !(Array.isArray(lane.media) && lane.media.length)) {
-      return el('div', { class: 'empty-lane-skip', hidden: true });
-    }
     const turnMode = validMode(turn.mode) || state.mode;
     const expectedWorkTimeline = turnMode === 'agent' || Boolean(turn.toolsEnabled);
     const deferTextToEnd = hasWorkTimeline || expectedWorkTimeline;

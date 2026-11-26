@@ -145,12 +145,6 @@ svg { display: block; }
 .app[data-dock="open"] {
   grid-template-columns: var(--sidebar-w) minmax(360px, 1fr) clamp(300px, calc(var(--dock-share) * 100vw), 760px);
 }
-.app[data-workspace-panel="open"] {
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--workspace-panel-w);
-}
-.app[data-dock="open"][data-workspace-panel="open"] {
-  grid-template-columns: var(--sidebar-w) minmax(300px, 1fr) var(--workspace-panel-w) clamp(280px, calc(var(--dock-share) * 100vw), 760px);
-}
 
 /* ---------------- Sidebar ---------------- */
 .sidebar {
@@ -263,6 +257,12 @@ svg { display: block; }
 .nav-item:disabled { color: #7b8480; opacity: .58; }
 .nav-item:disabled:hover { color: #7b8480; background: transparent; }
 .nav-item > .icon { color: #b9bfbb; }
+.nav-link { text-decoration: none; cursor: pointer; }
+.nav-more { max-height: 0; overflow: hidden; transition: max-height 280ms var(--ease); }
+.nav-more.is-open { max-height: 160px; }
+.nav-more-inner { display: grid; gap: 1px; }
+.nav-chevron { transition: transform 260ms var(--ease); }
+#navSeeMore[aria-expanded="true"] .nav-chevron { transform: rotate(180deg); }
 .nav-count {
   margin-left: auto;
   color: var(--muted-dim);
@@ -292,16 +292,12 @@ svg { display: block; }
   min-width: 0;
   padding: 4px 2px;
   color: #9fa6a2;
-  background: none;
-  border: 0;
-  border-radius: 5px;
   font-size: 10.5px;
   font-weight: 650;
   letter-spacing: 0.075em;
   text-transform: uppercase;
 }
 .recents-title .icon { width: 13px; height: 13px; opacity: .8; }
-.recents-title:hover { color: var(--text-soft); }
 .recents-count {
   display: inline-flex;
   align-items: center;
@@ -474,6 +470,41 @@ svg { display: block; }
   text-align: left;
 }
 .account-button:hover { background: #252929; border-color: #323636; }
+.account-button.is-signed-in,
+.account-button.is-signed-in:disabled,
+.boot-btn.is-signed-in,
+.boot-btn.is-signed-in:disabled,
+button.is-signed-in,
+button.is-signed-in:disabled {
+  background: rgba(63, 185, 80, 0.16) !important;
+  border-color: rgba(63, 185, 80, 0.65) !important;
+  color: #7ee787 !important;
+  opacity: 1 !important;
+  cursor: default !important;
+  pointer-events: none !important;
+}
+
+.account-button.is-signed-in:hover:not(:disabled) {
+  background: rgba(63, 185, 80, 0.2);
+  border-color: rgba(63, 185, 80, 0.72);
+}
+
+.account-button.is-signed-in .account-dot,
+.boot-btn.is-signed-in .account-dot {
+  background: #3fb950;
+  box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.22);
+}
+
+.account-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 1;
+  color: #3fb950;
+  margin-left: 2px;
+}
 .avatar {
   display: inline-grid;
   place-items: center;
@@ -494,6 +525,10 @@ svg { display: block; }
 .account-copy { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
 .account-name { overflow: hidden; color: #e1e5e2; font-size: 12.25px; font-weight: 600; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .account-state { overflow: hidden; color: var(--muted-dim); font-size: 10.5px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.account-row { display: flex; align-items: center; gap: 4px; }
+.account-row .account-button { flex: 1; min-width: 0; }
+.account-gear { width: 30px; height: 30px; flex: 0 0 auto; color: var(--muted); }
+.account-gear .icon { width: 16px; height: 16px; }
 .account-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--muted-dim); }
 .account-dot.is-online { background: var(--green); box-shadow: 0 0 0 3px rgba(125, 209, 148, .08); }
 .account-dot.is-error { background: var(--red); }
@@ -1347,7 +1382,7 @@ mark.find-hit-current { background: #d9a441; color: #1b1a17; }
 .model-pill-error { color: var(--red); background: transparent; border-color: #5e403b; max-width: 100%; }
 .model-strip-note { color: #77817b; font-size: 9px; line-height: 1.5; }
 
-.composer-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; min-height: 42px; padding: 4px 8px 7px 9px; }
+.composer-toolbar { display: flex; align-items: center; flex-wrap: nowrap; gap: 2px; min-height: 42px; padding: 4px 8px 7px 9px; }
 .composer-chip {
   display: inline-flex;
   align-items: center;
@@ -1389,6 +1424,40 @@ button.subagent-open { background: none; border: 0; padding: 0; cursor: pointer;
 .composer-chip.permission-chip.is-danger .icon { color: var(--red); }
 .toolbar-divider { width: 1px; height: 17px; margin: 0 4px; background: #3a4040; flex: 0 0 auto; }
 .toolbar-spacer { flex: 1; min-width: 4px; }
+.model-chips { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; }
+.model-chips .composer-chip { flex: 0 1 auto; min-width: 0; max-width: 200px; }
+.model-chips:empty { display: none; }
+.model-chip .lane-letter {
+  display: inline-grid; place-items: center;
+  width: 15px; height: 15px; flex: 0 0 auto;
+  color: #1b231e; background: #b9cabd; border-radius: 4px;
+  font-size: 9px; font-weight: 800;
+}
+.model-chip-empty { opacity: .75; }
+.model-chip-error { color: var(--red); }
+.agent-integration-chip { flex: 0 0 auto; }
+.agent-integration-pop { padding: 4px 2px 2px; }
+.agent-integration-host { display: flex; flex-direction: column; gap: 2px; }
+.agent-section { display: flex; flex-direction: column; gap: 2px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #363c3b; }
+.agent-section-title { font-size: 10px; font-weight: 700; color: #9fa6a2; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
+.agent-sub-title { font-size: 10.5px; font-weight: 600; color: #c6cec8; margin: 8px 0 2px; }
+.agent-folder-row { display: flex; align-items: center; gap: 8px; padding: 4px 2px; }
+.agent-folder-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c6cec8; font-size: 11px; }
+.agent-permission-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 8px 10px; border-radius: 8px; background: transparent; border: 0; text-align: left; cursor: pointer; }
+.agent-permission-row:hover { background: #323637; }
+.agent-permission-row:disabled { opacity: .5; cursor: default; }
+.agent-permission-value { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; color: #eef2ef; font-size: 11px; font-weight: 600; }
+.agent-permission-value .icon { width: 13px; height: 13px; color: #959f99; }
+.agent-permission-list { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.agent-permission-list[hidden] { display: none; }
+.agent-integration-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 10px; border-radius: 8px; cursor: pointer;
+}
+.agent-integration-row:hover { background: #323637; }
+.agent-integration-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.agent-integration-label { color: #eef2ef; font-size: 11.5px; font-weight: 600; }
+.agent-integration-desc { color: #8b948e; font-size: 10px; line-height: 1.4; }
 .send-button {
   display: inline-grid;
   place-items: center;
@@ -1454,7 +1523,8 @@ button.subagent-open { background: none; border: 0; padding: 0; cursor: pointer;
   z-index: 121;
   width: min(326px, calc(100vw - 20px));
   max-height: min(470px, calc(100vh - 22px));
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   color: var(--text);
   background: #292c2d;
   border: 1px solid #464c4c;
@@ -1520,6 +1590,11 @@ button.subagent-open { background: none; border: 0; padding: 0; cursor: pointer;
 .popover-empty { padding: 18px 12px; color: #8c958f; font-size: 10.5px; line-height: 1.55; text-align: center; }
 .popover-foot { display: flex; align-items: center; justify-content: space-between; gap: 7px; padding: 6px 8px; border-top: 1px solid #3a403f; }
 .model-option-meta { display: flex; align-items: center; gap: 4px; color: #78827c; font-size: 8.75px; white-space: nowrap; }
+.model-meta-inner { display: inline-flex; align-items: center; gap: 5px; }
+.model-rank { color: #e8f0ea; font-size: 11px; font-weight: 800; letter-spacing: .01em; }
+.model-score { color: #9aa59d; font-size: 9.5px; font-weight: 600; }
+.model-cap { display: inline-grid; place-items: center; width: 15px; height: 15px; color: #8fa396; }
+.model-cap .icon { width: 12px; height: 12px; }
 .model-color-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex: 0 0 auto; }
 .popover-danger-banner { display: flex; gap: 7px; margin: 1px 8px 7px; padding: 7px 8px; color: #e5bcb6; background: #362724; border: 1px solid #5a3b36; border-radius: 5px; font-size: 9.5px; line-height: 1.5; }
 .popover-danger-banner .icon { flex: 0 0 auto; width: 13px; height: 13px; margin-top: 1px; }
@@ -1739,14 +1814,64 @@ textarea.input { height: auto; min-height: 74px; resize: vertical; line-height: 
 
 /* ---------------- Workspace and connectors panel ---------------- */
 .workspace-panel {
+  position: fixed;
+  top: 64px;
+  right: 16px;
+  width: var(--workspace-panel-w, 380px);
+  height: min(72vh, 640px);
+  min-width: 280px;
+  min-height: 200px;
   display: flex;
   flex-direction: column;
-  min-width: 0;
-  min-height: 0;
   background: #1b1e1e;
-  border-left: 1px solid #383e3d;
+  border: 1px solid #383e3d;
+  border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0,0,0,.55);
   overflow: hidden;
-  animation: dock-in 220ms var(--ease);
+  z-index: 60;
+  transform: translateX(24px);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: transform 260ms var(--ease), opacity 220ms var(--ease), visibility 260ms var(--ease);
+}
+.workspace-panel.is-open {
+  transform: translateX(0);
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+.workspace-arrow {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  z-index: 55;
+  width: 22px;
+  height: 56px;
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: 8px 0 0 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: right 260ms var(--ease), color 160ms var(--ease), background 160ms var(--ease);
+}
+.workspace-arrow:hover { color: var(--text); background: var(--surface-3); }
+.workspace-arrow-icon { font-size: 16px; line-height: 1; transition: transform 260ms var(--ease); display: inline-block; }
+.workspace-arrow[aria-expanded="true"] { right: var(--workspace-panel-w, 380px); }
+.workspace-arrow[aria-expanded="true"] .workspace-arrow-icon { transform: rotate(180deg); }
+.workspace-panel-head { cursor: move; user-select: none; }
+.workspace-resize-corner {
+  position: absolute; right: 0; bottom: 0; width: 18px; height: 18px;
+  cursor: nwse-resize; z-index: 5;
+}
+.workspace-resize-corner::after {
+  content: ''; position: absolute; right: 3px; bottom: 3px; width: 10px; height: 10px;
+  border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); opacity: .6;
 }
 .workspace-panel-head {
   display: flex;
@@ -2680,7 +2805,7 @@ textarea.input { height: auto; min-height: 74px; resize: vertical; line-height: 
 }
 
 /* ---------------- v4.7 Arena Desktop: reference dropdowns, resize, icons ---------------- */
-.workspace-panel { position: relative; --connectors-share: 38%; }
+.workspace-panel { --connectors-share: 38%; }
 .workspace-panel .workspace-card { flex: 1 1 auto; }
 .workspace-panel .connectors-pane {
   flex: 0 1 var(--connectors-share, 38%);
@@ -2960,6 +3085,7 @@ body.is-resizing-y, body.is-resizing-y * { cursor: ns-resize !important; }
 }
 .account-menu-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .account-menu-avatar.is-expired { background: #2f6fb2; color: #fff; font-size: 14px; }
+.account-avatar.is-google.is-expired { background: #2f6fb2; color: #fff; font-size: 13px; }
 .account-menu-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0; }
 .account-menu-email { font-size: 12px; font-weight: 600; color: #eceee6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-menu-sub { font-size: 10.5px; color: #9a9b92; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3036,10 +3162,10 @@ body.is-resizing-y, body.is-resizing-y * { cursor: ns-resize !important; }
 .model-pin.is-fav { color: #ffd75e; }
 .model-pin-glyph { font-size: 13px; line-height: 1; }
 .popover-option.is-hidden-model { opacity: .45; }
-.meta-chip-btn { cursor: pointer; font: inherit; }
-.meta-chip-btn:hover { border-color: var(--accent-strong); }
+.meta-chip-btn { cursor: pointer; font: inherit; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; }
+.meta-chip-btn:hover { border-color: var(--accent-strong); color: var(--accent); }
 .meta-chip-btn:disabled { cursor: wait; opacity: .58; }
-.meta-chip-btn:disabled:hover { border-color: inherit; }
+.meta-chip-btn:disabled:hover { border-color: var(--border); color: var(--text); }
 .snapshot-list { max-height: 320px; overflow: auto; display: flex; flex-direction: column; gap: 2px; padding: 6px 0; }
 .snapshot-item { display: flex; gap: 8px; align-items: center; font-size: 12px; padding: 3px 6px; border-radius: 6px; cursor: pointer; }
 .snapshot-item:hover { background: #2a2f2e; }
@@ -3210,3 +3336,1247 @@ body.is-resizing-y, body.is-resizing-y * { cursor: ns-resize !important; }
 }
 .heavy-send-badge:hover { color: #fff2d2; border-color: #977a3e; }
 .heavy-send-badge > .icon { width: 12px; height: 12px; }
+
+/* Attach popover: connections section */
+.popover-connections { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
+.popover-section-title { font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: .06em; margin-bottom: 6px; }
+.popover-section-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.popover-connector-row .arena-connector-logo { width: 18px; height: 18px; border-radius: 5px; flex: 0 0 auto; }
+.popover-connector-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 550; color: #c6cec8; }
+.popover-connector-row { display: flex; align-items: center; gap: 8px; min-height: 33px; padding: 6px 7px; border-radius: 6px; }
+.popover-connector-row:hover { background: #313634; }
+.popover-connector-row .icon { width: 14px; height: 14px; color: #9aaba0; }
+.popover-connector-row .switch { position: relative; width: 36px; height: 20px; border-radius: 999px; background: var(--surface-3); border: 1px solid var(--border); cursor: pointer; padding: 0; flex: 0 0 auto; }
+.popover-connector-row .switch-knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--muted); transition: transform 160ms var(--ease), background 160ms var(--ease); }
+.popover-connector-row .switch.is-on { background: #2e5c3c; border-color: #4c7d5a; }
+.popover-connector-row .switch.is-on .switch-knob { transform: translateX(16px); background: #dff2e2; }
+.popover-connector-row .switch:disabled { opacity: .5; cursor: wait; }
+
+/* ---------------- Google AI mode track ----------------
+   Arena's dark palette stays untouched. The Google track swaps only the page
+   canvas to pure black (the reference swatch) and leaves the chat sidebar in
+   its own colour, so the two worlds are instantly recognisable. */
+body[data-track="google"] {
+  --bg: #000000;
+  --bg-deep: #000000;
+  --surface: #0b0b0c;
+  --surface-2: #101012;
+  --surface-raised: #131315;
+  --surface-soft: #0d0d0e;
+  --surface-hover: #17171a;
+  --surface-user: #16171a;
+  --line: #242427;
+  --line-soft: #1c1c1f;
+  background-color: #000000;
+  background-image: none;
+}
+
+/* The whole chat surface goes black — everything except the sidebar, which
+   keeps its own colour so the two worlds stay visually distinct. */
+body[data-track="google"] .main-shell,
+body[data-track="google"] .main-area,
+body[data-track="google"] .content,
+body[data-track="google"] .chat-view,
+body[data-track="google"] .welcome-view,
+body[data-track="google"] .composer-shell {
+  background-color: #000000;
+  background-image: none;
+}
+
+body[data-track="google"] .composer-card {
+  background: #0c0c0e;
+  border-color: #26262a;
+}
+
+body[data-track="google"] .composer-card textarea,
+body[data-track="google"] .composer-card textarea::placeholder {
+  color: #e8eaed;
+}
+
+body[data-track="google"] .composer-card textarea::placeholder { color: #7f8286; }
+
+body[data-track="google"] .message-user .bubble,
+body[data-track="google"] .message-user .message-bubble {
+  background: #16171a;
+  border-color: #26262a;
+}
+
+body[data-track="google"] .message-assistant,
+body[data-track="google"] .assistant-lane {
+  background: transparent;
+}
+
+body[data-track="google"] .sidebar {
+  background: #211f1e;
+}
+
+/* Google-tinted avatar/identity chip */
+.account-avatar.is-google {
+  background: linear-gradient(135deg, #4285f4 0%, #34a853 38%, #fbbc05 68%, #ea4335 100%);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+/* Smooth theme change: the surfaces that actually repaint. */
+html, body, .main-shell, .main-area, .content, .sidebar, .composer-shell,
+.composer-card, .welcome-view, .chat-view, .workspace-panel, .dock-pane {
+  transition: background-color 420ms ease, border-color 420ms ease;
+}
+
+/* Google AI mode keeps Agent integration and the plus menu (files + local
+   MCP, without arena.ai connectors). Mode, work-type and model choosers do
+   not belong here, and neither does their context line. */
+body[data-track="google"] #modalityButton,
+body[data-track="google"] #modeButton,
+body[data-track="google"] #modelChips,
+body[data-track="google"] .model-chips,
+body[data-track="google"] #modelStrip,
+body[data-track="google"] #composerContext {
+  display: none !important;
+}
+
+/* The record button sits alone on the left of the Google composer. */
+body[data-track="google"] .composer-toolbar {
+  justify-content: flex-start;
+}
+
+/* Google settings tab */
+.google-settings .settings-h { margin: 18px 0 8px; font-size: 13px; letter-spacing: .04em; text-transform: uppercase; color: var(--text-dim, #9aa0a6); }
+.google-settings .settings-h:first-child { margin-top: 0; }
+.google-settings .settings-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; flex-wrap: wrap; }
+.google-settings .settings-row-label { flex: 1 1 160px; }
+.google-settings .cookie-command-row { display: flex; align-items: center; gap: 8px; margin: 6px 0 8px; flex-wrap: wrap; }
+.google-settings .cookie-command {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  background: var(--surface-2, #191a1a); border: 1px solid var(--line, #2c2f2f);
+  border-radius: 7px; padding: 7px 10px; user-select: all; word-break: break-all;
+}
+.google-settings .cookie-field { width: 100%; min-height: 68px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.google-settings .settings-input { min-width: 0; }
+.google-account-row { border-top: 1px solid var(--line-soft, #232626); padding-top: 8px; }
+.google-settings .settings-row > .settings-input[type="email"] { flex: 1 1 100%; }
+.google-settings .cookie-actions {
+  display: flex; align-items: center; gap: 10px;
+  margin: 12px 0 4px; padding-top: 2px; flex-wrap: wrap;
+}
+.google-settings .cookie-actions .button { flex: 0 0 auto; }
+.google-settings .cookie-actions .settings-input { flex: 1 1 220px; }
+
+/* ---- Settings: Arena / Google AI mode scope switch (above the sections) ---- */
+.settings-tabs-column {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid #333938;
+  background: #212424;
+}
+.settings-tabs-column .settings-tabs {
+  border-right: 0;
+  padding-top: 6px;
+  overflow-y: auto;
+}
+.settings-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 11px 9px 0;
+  padding: 3px;
+  border: 1px solid #333938;
+  border-radius: 7px;
+  background: #1a1d1d;
+}
+.settings-scope-btn {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  width: 100%;
+  min-height: 26px;
+  padding: 4px 8px;
+  color: #9aa59d;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 140ms var(--ease), color 140ms var(--ease);
+}
+.settings-scope-btn:hover { background: #242828; color: #cfd8d1; }
+.settings-scope-btn[aria-pressed="true"] {
+  background: #2e3331;
+  border-color: #3f4744;
+  color: #e6ede7;
+}
+.settings-scope-btn .icon { width: 12px; height: 12px; }
+.settings-scope-note {
+  margin: 6px 11px 2px;
+  color: #8b968e;
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+/* The delete-dialog plate wears the chat-menu colour, not an amber warning. */
+.note-box.is-menu {
+  color: var(--text);
+  background: #292c2d;
+  border-color: #464c4c;
+}
+.note-box.is-menu > .icon { color: #9aa59d; }
+
+/* Cookie guide: a real numbered walkthrough */
+.cookie-steps {
+  margin: 6px 0 10px;
+  padding-left: 18px;
+  color: #a9b3ac;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.cookie-steps li { margin-bottom: 4px; }
+.cookie-steps li::marker { color: #7f8c84; font-weight: 650; }
+
+/* Imported Google thread card */
+.imported-thread-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 auto 14px;
+  max-width: 860px;
+  padding: 12px 14px;
+  border: 1px solid #333938;
+  border-radius: 10px;
+  background: #16181a;
+}
+.imported-thread-icon { color: #9aa59d; display: inline-flex; margin-top: 2px; }
+.imported-thread-copy { display: flex; flex-direction: column; gap: 3px; flex: 1 1 auto; }
+.imported-thread-title { color: #e6ede7; font-size: 12px; font-weight: 620; }
+.imported-thread-desc { color: #939d96; font-size: 11px; line-height: 1.45; }
+
+/* A long meta line ("Google AI mode · imported · 2 minutes ago") must never
+   wrap: chat rows are a fixed height, so a second line ran into the row below. */
+.chat-row-meta {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-row-main { min-width: 0; }
+
+/* ---- Google AI mode settings: two separate cookie boxes ---------------- */
+.cookie-field-block { margin: 10px 0 14px; }
+.cookie-field-title { display: block; font-size: 12.5px; font-weight: 600; color: #e8e9e0; margin-bottom: 3px; }
+.cookie-field-where { margin: 0 0 6px; font-size: 11.5px; line-height: 1.5; color: #9c9d94; }
+.cookie-field-note { margin-top: 5px; }
+.cookie-command-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0 4px; }
+.settings-row-label.is-expired { color: #e2a09a; }
+.account-status-card.is-expired { background: #2a1f1e; border-color: #5a3a37; }
+.message-error { flex-wrap: wrap; }
+.message-error .button { margin-left: auto; }
+
+/* ---------------- Google AI mode: black surfaces ----------------
+   The Google track is the black one: the chat area, the composer, the
+   workspace pane and the topbar all sit on #000, and the sidebar keeps the
+   panel colour the chat menu uses, so the two surfaces stay visibly apart. */
+/* The strip under the title bar is the same surface as the chat menu
+   (the sidebar), so the frame reads as one piece around a black canvas. */
+body[data-track="google"] .topbar {
+  background: #211f1e;
+  border-bottom-color: #1b1b1e;
+}
+body[data-track="google"] .workspace-panel,
+body[data-track="google"] .dock-pane,
+body[data-track="google"] .dock-pane-header,
+body[data-track="google"] .workspace-body,
+body[data-track="google"] .workspace-tabs,
+body[data-track="google"] .pane-body {
+  background: #000000;
+  border-color: #1b1b1e;
+}
+body[data-track="google"] .workspace-tab {
+  background: transparent;
+  color: #a7a49e;
+}
+body[data-track="google"] .workspace-tab.is-active {
+  background: #131315;
+  color: #f5f4f0;
+}
+/* The "panel" in the screenshot is the sidebar; it must read as the same
+   surface as the chat menu, not as a lighter block next to the black chat. */
+body[data-track="google"] .sidebar {
+  background: #211f1e;
+  border-right-color: #1b1b1e;
+}
+body[data-track="google"] .chat-row.is-active { background: #353532; }
+body[data-track="google"] .new-chat-button { background: #30302e; border-color: #454441; }
+
+.google-settings .cookie-field-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 4px;
+}
+.google-settings .cookie-field-head .cookie-field-title { margin: 0; }
+.google-settings .cookie-field-block { margin-bottom: 16px; }
+.google-settings .cookie-field-block:last-of-type { margin-bottom: 8px; }
+/* Dropdowns inside the Google settings panel follow the dark panel, not the
+   OS default white widget that made the language row look foreign. */
+.google-settings select.settings-input,
+body[data-track="google"] .settings-panel select {
+  background-color: #2d2d2b;
+  color: #f5f4f0;
+  border: 1px solid #454441;
+  border-radius: 8px;
+  padding: 6px 8px;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a7a49e' stroke-width='2'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  padding-right: 26px;
+}
+.google-settings select.settings-input option,
+body[data-track="google"] .settings-panel select option {
+  background: #262624; color: #f5f4f0;
+}
+
+/* ======================================================================
+   Toolbar-only layout
+   The sidebar is gone. The whole chrome is one top bar: fold button,
+   repository, chat drawer, the logo/title with the chat rail, then profile,
+   settings, Discord and the workspace folder. Chat list and modes live in a
+   drawer that drops down from that bar.
+   ====================================================================== */
+.app,
+.app[data-dock="open"] {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  transition: none;
+}
+.app.sidebar-collapsed,
+.app.rail-collapsed { --sidebar-w: 0px; }
+.sidebar, .main-shell > .sidebar, #sidebar { display: none !important; }
+
+.main-shell { grid-column: 1; grid-row: 2; min-height: 0; }
+.topbar { grid-column: 1; grid-row: 1; }
+
+/* ---- topbar as a three-zone toolbar ---- */
+.topbar {
+  position: relative;
+  z-index: 40;
+  gap: 8px;
+  padding: 0 14px;
+  min-height: 54px;
+  flex-basis: 54px;
+  background: #17181a;
+  border-bottom: 1px solid #24262a;
+}
+.topbar-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; border-radius: 9px;
+  color: var(--muted); text-decoration: none;
+}
+.topbar-icon:hover { background: #232528; color: var(--text); }
+.topbar-icon.is-active { background: #2b2d31; color: var(--text); }
+.rail-toggle { flex: 0 0 auto; }
+
+.chats-drawer-button { position: relative; flex: 0 0 auto; }
+.chats-count {
+  position: absolute; top: 2px; right: 1px;
+  min-width: 14px; height: 14px; padding: 0 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 7px; background: #3a3d42; color: #d6d6d6;
+  font-size: 9px; font-weight: 700; line-height: 1;
+}
+.chats-count:empty { display: none; }
+
+/* ---- centre: logo or title, with the chat strip around New chat ---- */
+.rail-center {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; justify-content: flex-start;
+  gap: 12px;
+}
+/* The strip owns the middle of the bar; the logo sits at its left end and
+   collapses away as soon as the chats are folded. */
+.rail-strip { flex: 1 1 auto; min-width: 0; }
+/* Sides never push the New chat button: what does not fit simply stays out
+   of the visible strip and the drawer lists it. */
+.rail-side > .rail-chip:nth-last-child(n+9) { display: none; }
+.rail-brand {
+  display: flex; align-items: center; gap: 9px;
+  flex: 0 0 auto;
+  min-width: 0;
+  color: var(--text);
+}
+.rail-brand .brand-mark {
+  display: inline-flex; width: 26px; height: 26px; flex: 0 0 auto;
+  color: var(--text);
+}
+.rail-brand .brand-name {
+  flex: 0 0 auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 14px; font-weight: 650; letter-spacing: -.01em;
+}
+/* Folded: the logo stays, the chats go, and the name + logo sit in the
+   middle of the bar — the whole rail is pushed to the same centre. */
+.rail-collapsed .rail-center { justify-content: center; }
+.rail-collapsed .rail-brand .brand-mark { display: inline-flex; }
+.rail-collapsed .rail-brand { justify-content: center; gap: 8px; }
+
+.rail-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  transition: opacity 180ms ease;
+}
+.rail-collapsed .rail-strip { display: none; }
+
+.rail-side {
+  display: flex; align-items: center; gap: 6px;
+  min-width: 0; overflow: hidden;
+}
+.rail-side-left { justify-content: flex-start; overflow: hidden; }
+.rail-side-right { justify-content: flex-start; overflow: hidden; }
+.rail-side::-webkit-scrollbar { display: none; }
+
+.rail-chip {
+  max-width: 132px;
+  padding: 5px 10px;
+  border: 1px solid #2b2d31;
+  border-radius: 999px;
+  background: #1d1f22;
+  color: var(--text-soft);
+  font: inherit; font-size: 11.5px; line-height: 1.2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: pointer;
+  animation: railChipIn 220ms ease both;
+}
+.rail-chip:hover { background: #26282c; color: var(--text); }
+.rail-chip.is-active { background: #f2efe9; border-color: #f2efe9; color: #17181a; }
+.rail-side-left .rail-chip { transform-origin: right center; }
+.rail-side-right .rail-chip { transform-origin: left center; }
+@keyframes railChipIn {
+  from { opacity: 0; transform: translateX(var(--chip-dir, 6px)) scale(.96); }
+  to { opacity: 1; transform: none; }
+}
+.rail-side-left .rail-chip { --chip-dir: 8px; }
+.rail-side-right .rail-chip { --chip-dir: -8px; }
+@media (prefers-reduced-motion: reduce) {
+  .rail-chip { animation: none; }
+}
+
+.rail-new-chat {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 12px;
+  border: 1px solid #3a3d42; border-radius: 999px;
+  background: #232528; color: var(--text);
+  font: inherit; font-size: 12px; font-weight: 600;
+  white-space: nowrap; cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.rail-new-chat:hover { background: #2d3034; border-color: #4a4d52; }
+.rail-new-chat .icon { width: 14px; height: 14px; }
+
+/* ---- right zone ---- */
+.topbar-actions { flex: 0 0 auto; gap: 6px; }
+.topbar-account {
+  display: flex; align-items: center; gap: 8px;
+  max-width: 210px; padding: 3px 8px 3px 4px;
+  border: 1px solid transparent; border-radius: 999px;
+  background: transparent; color: var(--text);
+  font: inherit; cursor: pointer;
+}
+.topbar-account:hover { background: #232528; border-color: #2b2d31; }
+.topbar-account .avatar { width: 26px; height: 26px; flex: 0 0 auto; }
+.topbar-account .account-copy { display: flex; flex-direction: column; min-width: 0; }
+.topbar-account .account-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11.5px; font-weight: 600; line-height: 1.2;
+}
+.topbar-account .account-state {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted-dim); font-size: 10px; line-height: 1.2;
+}
+.topbar-account .account-dot {
+  position: static; flex: 0 0 auto; margin-left: 2px;
+}
+@media (max-width: 1120px) {
+  .topbar-account .account-copy { display: none; }
+  .topbar-account { padding: 3px; }
+}
+@media (max-width: 900px) {
+  .rail-chip { max-width: 96px; }
+  .rail-new-chat .rail-new-chat-label { display: none; }
+  .rail-new-chat { padding: 0 9px; }
+}
+
+/* ---- chat drawer ---- */
+.chats-drawer {
+  position: fixed;
+  top: 62px; left: 14px;
+  z-index: 60;
+  display: flex; flex-direction: column;
+  width: min(360px, calc(100vw - 28px));
+  max-height: min(70vh, 620px);
+  padding: 10px;
+  border: 1px solid #2b2d31; border-radius: 14px;
+  background: #1b1c1f;
+  box-shadow: 0 22px 60px rgba(0, 0, 0, .55);
+  animation: drawerIn 160ms ease both;
+}
+.chats-drawer[hidden] { display: none; }
+@keyframes drawerIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.chats-drawer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 2px 4px 8px;
+}
+.chats-drawer-title {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--text); font-size: 12px; font-weight: 650;
+  text-transform: uppercase; letter-spacing: .08em;
+}
+.chats-drawer-modes { display: flex; gap: 6px; padding: 0 2px 8px; }
+.chats-drawer-modes .nav-item { flex: 1 1 0; justify-content: center; }
+.chats-drawer .chat-search { margin: 0 2px 6px; }
+.chats-drawer .recents-body { overflow: auto; min-height: 0; }
+.chats-drawer-foot { padding: 8px 2px 0; border-top: 1px solid #26282c; margin-top: 6px; }
+.chats-drawer .sidebar-legal { display: flex; gap: 12px; font-size: 10.5px; }
+
+/* The Google track and the Arena track share the toolbar colours. */
+body[data-track="google"] .topbar { background: #17181a; border-bottom-color: #24262a; }
+body[data-track="google"] .chats-drawer { background: #141517; border-color: #24262a; }
+
+/* ---- Google AI mode settings: the colour of the chat menu ---- */
+.modal.modal-settings-google {
+  background: #131416;
+  border: 1px solid #26282c;
+}
+.modal.modal-settings-google .modal-head {
+  background: #131416;
+  border-bottom-color: #212327;
+}
+.modal.modal-settings-google .modal-body { background: #131416; }
+.modal.modal-settings-google .modal-foot {
+  background: #131416;
+  border-top-color: #212327;
+}
+.modal.modal-settings-google .settings-tabs-column {
+  background: #0e0f11;
+  border-right-color: #212327;
+}
+.modal.modal-settings-google .settings-tabs { background: #0e0f11; }
+.modal.modal-settings-google .settings-scope {
+  background: #0a0b0c;
+  border-color: #26282c;
+}
+.modal.modal-settings-google .settings-tab { color: #a7a49e; }
+.modal.modal-settings-google .settings-tab[aria-selected="true"] {
+  background: #1d1f22;
+  color: #f5f4f0;
+}
+.modal.modal-settings-google .settings-scope-btn[aria-pressed="true"] {
+  background: #26282c;
+  color: #f5f4f0;
+}
+
+/* ---- Cookie boxes match the settings inputs, not raw browser widgets ----
+   A real <textarea> keeps the OS scrollbar and its own radius; the settings
+   panel uses bordered rounded fields everywhere else, so these follow. */
+.google-settings textarea.cookie-field,
+.google-settings .settings-input {
+  width: 100%;
+  min-height: 74px;
+  padding: 10px 12px;
+  border: 1px solid #3a3d42;
+  border-radius: 10px;
+  background: #0f1012;
+  color: #ecebe7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  box-shadow: none;
+  outline: none;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+.google-settings textarea.cookie-field::placeholder { color: #6b6d72; }
+.google-settings textarea.cookie-field:hover { border-color: #4a4d52; }
+.google-settings textarea.cookie-field:focus {
+  border-color: #6b6e75;
+  box-shadow: 0 0 0 3px rgba(150, 152, 158, .14);
+}
+.google-settings textarea.cookie-field::-webkit-scrollbar { width: 8px; height: 8px; }
+.google-settings textarea.cookie-field::-webkit-scrollbar-thumb {
+  background: #33363b; border-radius: 4px;
+}
+.google-settings input[type="email"].settings-input {
+  width: 100%;
+  min-height: 30px;
+  height: 30px;
+  padding: 0 12px;
+  font-family: inherit;
+  font-size: 12px;
+  border-radius: 999px;
+}
+.google-settings .cookie-field-title {
+  font-size: 12px; font-weight: 650; letter-spacing: .01em; color: #f0efeb;
+}
+.google-settings .cookie-field-where {
+  margin: 2px 0 8px; color: #8d8a84; font-size: 11px; line-height: 1.5;
+}
+.google-settings .cookie-field-note {
+  margin: 6px 0 0; color: #86837d; font-size: 11px; line-height: 1.5;
+}
+.google-settings .cookie-field-block {
+  padding: 12px 12px 10px;
+  border: 1px solid #232528;
+  border-radius: 12px;
+  background: #17181b;
+}
+
+/* ---- Workspace panel: black, like the rest of the Google canvas ---- */
+body[data-track="google"] .workspace-card {
+  background: #000000;
+  border-color: #1b1b1e;
+}
+body[data-track="google"] .workspace-files-pane,
+body[data-track="google"] .workspace-git-pane,
+body[data-track="google"] .workspace-tree,
+body[data-track="google"] .workspace-git { background: #000000; }
+body[data-track="google"] .workspace-panel-head {
+  background: #000000;
+  border-bottom-color: #1b1b1e;
+}
+body[data-track="google"] .workspace-tabs { background: #000000; border-color: #1b1b1e; }
+body[data-track="google"] .workspace-tab.is-active { background: #131315; color: #f5f4f0; }
+body[data-track="google"] .workspace-tree-row:hover,
+body[data-track="google"] .workspace-row:hover { background: #131315; }
+body[data-track="google"] .workspace-tab-badge { background: #26262a; color: #cfccc6; }
+.modal.modal-settings-google .settings-layout,
+.modal.modal-settings-google .settings-panels { background: #131416; }
+.modal.modal-settings-google .settings-panels { color: #cfccc6; }
+.modal.modal-settings-google h3.settings-h { color: #f5f4f0; }
+.modal.modal-settings-google .setting-desc { color: #8f8c86; }
+.modal.modal-settings-google .settings-row { border-color: #212327; }
+.modal.modal-settings-google .account-status-card {
+  background: #17181b; border-color: #26282c;
+}
+/* The white hairline in the screenshot was the panel's own outer border:
+   on the black canvas it has to sit at the same tone as the composer. */
+body[data-track="google"] .workspace-panel {
+  border-color: #26262a;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .5);
+}
+body[data-track="google"] .workspace-card { border-color: #26262a; }
+body[data-track="google"] .workspace-files-pane,
+body[data-track="google"] .workspace-git-pane { border-color: #1b1b1e; }
+/* Tabs: only the active one is lifted, both stay dark. */
+body[data-track="google"] .workspace-tabs {
+  background: #0a0a0b;
+  border-bottom: 1px solid #1b1b1e;
+}
+body[data-track="google"] .workspace-tab {
+  background: transparent; color: #8d8a84; border-color: transparent;
+}
+body[data-track="google"] .workspace-tab:hover { color: #cfccc6; background: #131315; }
+body[data-track="google"] .workspace-tab.is-active,
+body[data-track="google"] .workspace-tab[aria-selected="true"] {
+  background: #131315; color: #f5f4f0; border-color: #26262a;
+}
+body[data-track="google"] .workspace-tab .icon { color: #cfccc6; }
+.chats-drawer-modes .nav-item {
+  border: 1px solid #26282c; border-radius: 9px; background: #17181b;
+  justify-content: center;
+}
+.chats-drawer-modes .nav-item:hover { background: #202226; }
+
+/* ======================================================================
+   Toolbar v2 — two rows, exactly as sketched
+   Row 1 (always): fold · repo · chats · logo + name · profile · settings
+                   · Discord (unfolded only) · workspace folder
+   Row 2 (unfolded): chats → [New chat] ← chats, centred under the name
+   ====================================================================== */
+.topbar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 0;
+  padding: 0;
+  min-height: 0;
+  flex: 0 0 auto;
+  background: #17181a;
+  border-bottom: 1px solid #24262a;
+}
+.topbar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 0 14px;
+}
+.topbar-side {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.topbar-side-left { justify-content: flex-start; }
+.topbar-side-right { justify-content: flex-end; }
+.topbar-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.topbar-center .rail-brand { gap: 10px; }
+.topbar-center .rail-brand .brand-name {
+  font-size: 19px; font-weight: 650; letter-spacing: -.015em;
+  color: #f5f4f0;
+}
+.topbar-center .rail-brand .brand-mark { width: 30px; height: 30px; }
+
+/* Discord is part of the unfolded layout only. */
+.topbar-discord { display: none; }
+.app:not(.rail-collapsed) .topbar-discord { display: inline-flex; }
+
+/* Row 2 */
+.topbar-rail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px 10px;
+  max-height: 60px;
+  overflow: hidden;
+  transition: max-height 220ms ease, opacity 180ms ease, padding 220ms ease;
+}
+.rail-collapsed .topbar-rail {
+  max-height: 0;
+  opacity: 0;
+  padding-bottom: 0;
+  pointer-events: none;
+}
+.rail-side { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.rail-side-left { justify-content: flex-end; }
+.rail-side-right { justify-content: flex-start; }
+.rail-side .rail-chip { flex: 0 0 auto; }
+
+/* The fold button reflects the state of the rail. */
+.rail-collapsed .rail-toggle .icon { transform: scaleX(-1); }
+
+/* Folded: the title may be long, so it is allowed a wider box. */
+.rail-collapsed .topbar-center .rail-brand .brand-name {
+  max-width: min(52vw, 520px);
+}
+
+/* The chat button is an outline bubble, as sketched. */
+.chats-drawer-button {
+  border: 1px solid #3a3d42;
+  border-radius: 10px;
+  width: 34px; height: 34px;
+  color: #cfccc6;
+}
+.chats-drawer-button:hover { border-color: #4d5057; color: #fff; }
+.chats-drawer-button[aria-expanded="true"] { background: #232528; border-color: #4d5057; }
+
+/* Chips carry no count badge any more. */
+.chats-count { display: none; }
+
+/* ---- Row 1: pinned edges + one centre cluster ---- */
+.topbar-row {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 0 14px;
+}
+.topbar-edge { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.topbar-edge-left { justify-self: start; }
+.topbar-edge-right { justify-self: end; }
+.topbar-cluster {
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.topbar-cluster .chats-drawer-button { margin-right: 2px; }
+.topbar-cluster .rail-brand { margin: 0 4px 0 2px; }
+.topbar-cluster .topbar-account { margin-left: 6px; }
+.topbar-center { display: none; }
+/* Discord sits between settings and the right edge, only when unfolded. */
+.app:not(.rail-collapsed) .topbar-discord { display: inline-flex; }
+
+/* ---- Chat drawer: anchored to the chats icon, not the window ---- */
+.chats-drawer-anchor {
+  position: static;   /* the button itself is the reference point */
+}
+/* Invisible full-screen shield: a click anywhere else closes the list. */
+.chats-drawer-shield {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: default;
+}
+.chats-drawer-shield[hidden] { display: none; }
+
+.chats-drawer {
+  position: absolute;
+  z-index: 60;
+  /* It hangs from its own button: the arrow of the popover points at it. */
+  top: calc(100% - 2px);
+  left: 0;
+  width: min(360px, calc(100vw - 28px));
+  max-height: min(70vh, 620px);
+  margin-top: 6px;
+}
+/* The button must be the positioning context, so the drawer starts exactly
+   under it. Both live in the same stack, so the button owns the offset. */
+.topbar-cluster { position: relative; }
+.chats-drawer {
+  left: var(--drawer-left, 0px);
+}
+.chats-drawer::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: var(--drawer-caret, 18px);
+  width: 10px; height: 10px;
+  background: #1b1c1f;
+  border-left: 1px solid #2b2d31;
+  border-top: 1px solid #2b2d31;
+  transform: rotate(45deg);
+}
+body[data-track="google"] .chats-drawer::before { background: #141517; border-color: #24262a; }
+
+/* The chats button must stay clickable while its own drawer is open, so it
+   sits above the click-away shield. The drawer itself is above both. */
+.chats-drawer-button { position: relative; z-index: 58; }
+.chats-drawer { z-index: 62; }
+/* The click-away shield lives outside the toolbar: fixed, invisible, and out
+   of every grid so it can never push a row around. */
+.chats-drawer-shield {
+  position: fixed; inset: 0; z-index: 55;
+  display: block; padding: 0; border: 0; background: transparent;
+}
+.chats-drawer-shield[hidden] { display: none; }
+
+/* Row 1 is exactly three columns. The drawer anchor is a positioning helper,
+   so it is taken out of the grid instead of stealing a column. */
+.topbar-row { grid-template-columns: 1fr auto 1fr; }
+.chats-drawer-anchor {
+  position: absolute;
+  top: 0; left: 0;
+  width: 0; height: 0;
+}
+.chats-drawer-anchor { pointer-events: none; }
+.chats-drawer-anchor > .chats-drawer { pointer-events: auto; }
+
+/* ======================================================================
+   Toolbar polish, round 3
+   ====================================================================== */
+/* Repo icon: folded state only (the user's sketch of the folded bar has it,
+   the unfolded one does not). */
+.topbar-repo { display: none; }
+.app.rail-collapsed .topbar-repo { display: inline-flex; }
+
+/* Bigger logo and name, and they own the true centre of the bar. */
+.topbar-row { grid-template-columns: 1fr auto 1fr; }
+.topbar-center { justify-self: center; display: flex; }
+.topbar-center .rail-brand { gap: 12px; margin: 0; }
+.topbar-center .rail-brand .brand-mark { width: 36px; height: 36px; }
+.topbar-center .rail-brand .brand-name {
+  font-size: 24px; font-weight: 650; letter-spacing: -.02em; color: #f7f6f2;
+}
+/* Icons grow with the bar. */
+.topbar-edge .icon-button,
+.topbar-edge .topbar-icon { width: 40px; height: 40px; }
+.topbar-edge .icon { width: 22px; height: 22px; }
+.topbar-edge .rail-toggle .icon { width: 22px; height: 22px; }
+.topbar-edge { gap: 10px; }
+.topbar-row { min-height: 66px; }
+
+/* Chats button: bare icon, no frame. */
+.chats-drawer-button,
+.chats-drawer-button:hover,
+.chats-drawer-button[aria-expanded="true"] {
+  border: 0; background: transparent; box-shadow: none;
+  width: 40px; height: 40px; border-radius: 10px; color: #d6d3cd;
+}
+.chats-drawer-button:hover { background: #232528; color: #fff; }
+
+/* The drawer anchor no longer steals a column, so this is the only rule. */
+.chats-drawer-anchor { position: absolute; top: 0; left: 0; width: 0; height: 0; }
+
+/* Repeats read slightly quieter than real chats. */
+.rail-chip.is-repeat { opacity: .68; }
+.rail-chip.is-repeat:hover { opacity: 1; }
+
+/* The anchor is a zero-size positioning helper with pointer-events: none, which
+   made everything inside it dead to clicks. The drawer itself must take them. */
+.chats-drawer-anchor,
+.chats-drawer-anchor * { pointer-events: none; }
+.chats-drawer-anchor .chats-drawer,
+.chats-drawer-anchor .chats-drawer * { pointer-events: auto; }
+.chats-drawer { position: absolute; z-index: 62; }
+
+/* ---------------------------------------------------------------------------
+   Startup gate
+   ---------------------------------------------------------------------------
+   Covers the whole window until every blocking readiness check passes. The
+   app behind it is not merely blurred: it stays unreachable, which is the
+   point — a half-started app is worse than a clear "not yet".
+--------------------------------------------------------------------------- */
+
+.boot-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg, #0b0b0d);
+  backdrop-filter: blur(2px);
+}
+
+.boot-gate[hidden] { display: none; }
+
+.boot-gate.is-leaving {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 220ms ease;
+}
+
+.boot-card {
+  width: min(520px, 100%);
+  border: 1px solid var(--border, #2a2a30);
+  border-radius: 16px;
+  background: var(--panel, #141417);
+  padding: 24px 24px 20px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .55);
+}
+
+.boot-head {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  margin-bottom: 20px;
+}
+
+.boot-mark {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: rgba(124, 108, 255, .14);
+  color: #a99bff;
+}
+
+.boot-title {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--text, #ececf1);
+}
+
+.boot-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted, #9a9aa5);
+}
+
+.boot-steps {
+  list-style: none;
+  margin: 0 0 18px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.boot-step {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  gap: 10px;
+  align-items: start;
+  padding: 9px 10px;
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--muted, #9a9aa5);
+}
+
+.boot-step.is-active { background: rgba(255, 255, 255, .035); color: var(--text, #ececf1); }
+.boot-step.is-failed { background: rgba(220, 80, 80, .10); }
+
+.boot-step-icon {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.boot-step.is-done .boot-step-icon { color: #57c98a; }
+.boot-step.is-failed .boot-step-icon { color: #e2685f; }
+.boot-step.is-active .boot-step-icon { color: #a99bff; }
+
+.boot-step-name { font-weight: 500; }
+
+.boot-step-detail {
+  grid-column: 2 / -1;
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted, #8b8b96);
+}
+
+.boot-step-note {
+  grid-column: 2 / -1;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted, #8b8b96);
+}
+
+.boot-step-action {
+  grid-column: 2 / -1;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #e2b25f;
+}
+
+.boot-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(169, 155, 255, .3);
+  border-top-color: #a99bff;
+  border-radius: 50%;
+  animation: boot-spin .7s linear infinite;
+}
+
+@keyframes boot-spin { to { transform: rotate(360deg); } }
+
+.boot-foot { display: flex; flex-direction: column; gap: 10px; }
+
+.boot-progress {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .07);
+  overflow: hidden;
+}
+
+.boot-progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #7c6cff, #a99bff);
+  transition: width 260ms ease;
+}
+
+.boot-hint { margin: 0; font-size: 12px; color: var(--muted, #8b8b96); }
+
+.boot-actions { display: flex; gap: 8px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-spinner { animation-duration: 2s; }
+  .boot-progress-fill { transition: none; }
+}
+
+.boot-step-actions {
+  grid-column: 2 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.boot-action-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 13px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.045);
+  color: #e9f2ea;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.boot-action-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.26);
+}
+
+.boot-action-btn.primary {
+  background: rgba(141, 211, 154, 0.14);
+  border-color: rgba(141, 211, 154, 0.42);
+  color: #b8e5bf;
+}
+
+.boot-action-btn.primary:hover:not(:disabled) {
+  background: rgba(141, 211, 154, 0.22);
+  border-color: rgba(141, 211, 154, 0.65);
+}
+
+.boot-action-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.boot-step {
+  position: relative;
+}
+
+.boot-step-header,
+.boot-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.boot-step-reload {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(233, 242, 234, 0.65);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.2s ease;
+}
+
+.boot-step-reload:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: #e9f2ea;
+}
+
+.boot-step-reload-icon {
+  display: inline-block;
+  line-height: 1;
+  transform-origin: center center;
+}
+
+.boot-step-reload.is-spinning {
+  pointer-events: none;
+  color: #8dd39a;
+  border-color: rgba(141, 211, 154, 0.35);
+}
+
+.boot-step-reload.is-spinning .boot-step-reload-icon {
+  animation: bootSpin 0.75s linear infinite;
+}
+
+@keyframes bootSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Минималистичная кнопка Continue anyway под общий тёмный стиль */
+.boot-btn.boot-continue-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 7px 15px;
+  border-radius: 8px;
+  border: 1px solid rgba(141, 211, 154, 0.36);
+  background: rgba(141, 211, 154, 0.11);
+  color: #c5ebd0;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.boot-btn.boot-continue-btn:hover {
+  background: rgba(141, 211, 154, 0.19);
+  border-color: rgba(141, 211, 154, 0.6);
+  color: #e9f7ec;
+}
+
+/* A tick beside a sign-in button: shown only when that account is signed in.
+   aria-label carries the meaning for anyone not looking at the glyph. */
+.signin-tick {
+  display: inline-block;
+  min-width: 1.1em;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent, #3fb950);
+  text-align: center;
+}
+.signin-tick[data-signed-in="false"] { visibility: hidden; }
+
+/* Minimalist Clear Cache button */
+#clearCacheBtn,
+#cacheClearBtn,
+#settingsClearCacheBtn,
+.cache-clear-btn,
+[data-action="clear-cache"] {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 13px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.045);
+  color: #e9f2ea;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+#clearCacheBtn:hover:not(:disabled),
+#cacheClearBtn:hover:not(:disabled),
+#settingsClearCacheBtn:hover:not(:disabled),
+.cache-clear-btn:hover:not(:disabled),
+[data-action="clear-cache"]:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.095);
+  border-color: rgba(255, 255, 255, 0.26);
+}
+
+#clearCacheBtn:disabled,
+#cacheClearBtn:disabled,
+#settingsClearCacheBtn:disabled,
+.cache-clear-btn:disabled,
+[data-action="clear-cache"]:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

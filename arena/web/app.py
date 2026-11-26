@@ -32,6 +32,7 @@ from arena.config import (
     BASE_URL,
     CHATS_DIR,
     COOKIE_FILE,
+    CONFIG_DIR,
     ensure_config_dir,
     load_config,
     save_config,
@@ -41,6 +42,7 @@ from arena.models import (sync_models, get_models_for_modality, get_router_model
                           get_auto_agent_model, model_input_support,
                           model_can_receive_attachment, ORG_COLOR_MAP)
 from arena.auth import detect_installed_browsers, parse_cookie_input
+from arena import google_http
 from arena.deep_links import parse_deep_link
 
 import base64
@@ -278,9 +280,22 @@ else:
 STATIC_DIR = _base / "arena" / "web" / "static" if getattr(sys, 'frozen', False) else Path(__file__).parent / "static"
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="/static")
+
+
+def _diag_trace(fn):
+    return fn
+
 _API_TOKEN = secrets.token_urlsafe(32)
 
 APP_VERSION = "6.0.0"
+
+# One tick of every polling loop that waits on something outside the request
+# (a question the person has to answer, a permission, a preview URL). It is a
+# named constant, not a literal `1`, so a test can shorten *the wait* without
+# touching `time.sleep` itself: `test_iter_records_idle_bounds_a_silent_stream`
+# asserts on three seconds of silence in a stream, and a blanket patch would
+# answer a different question than the one it asks.
+POLL_TICK = 1.0
 
 
 @app.after_request
@@ -313,7 +328,7 @@ def _save_chat(chat_id: str, title: str, messages: list,
                mcp_guide_hash: str = None, memory_hash: str = None,
                pending_digest: str = None, parent_id: str = None,
                delegate_guide: bool = None, gateway_session: str = None,
-               account_id: str = None):
+               account_id: str = None, supervisor_of: str = None):
     with _chat_file_lock:
         if not _validate_chat_id(chat_id):
             return
@@ -344,6 +359,7 @@ def _save_chat(chat_id: str, title: str, messages: list,
             "memory_hash": memory_hash if memory_hash is not None else existing.get("memory_hash"),
             "pending_digest": pending_digest if pending_digest is not None else existing.get("pending_digest"),
             "parent_id": (parent_id or None) if parent_id is not None else existing.get("parent_id"),
+            "supervisor_of": (supervisor_of or None) if supervisor_of is not None else existing.get("supervisor_of"),
             "delegate_guide": bool(delegate_guide) if delegate_guide is not None else bool(existing.get("delegate_guide")),
             "agent_backend": agent_backend or existing.get("agent_backend"),
             "gateway_session": gateway_session if gateway_session is not None else existing.get("gateway_session"),
@@ -405,6 +421,8 @@ def _list_chats() -> list:
                 "parent_id": data.get("parent_id"),
                 "source": data.get("source") or "local",
                 "message_count": len(data.get("messages", [])),
+                "external_url": data.get("external_url") or "",
+                "imported": bool(data.get("imported")),
             })
         except Exception:
             pass
@@ -496,6 +514,13 @@ def _write_cookie_file(cookie: str) -> None:
 
 
 def get_client() -> ArenaClient:
+    """The app's Arena session.
+
+    ``allow_cdp`` is off: the desktop build drives arena.ai in its own WebView
+    window, so probing for a debugging Chrome on 9222 is pure latency — and a
+    port that accepts a connection and then stalls delayed the first chat by
+    seconds, which reads as the app freezing.
+    """
     global _client
     if _client is None:
         _client = ArenaClient(cookie_str=_read_cookie_file())
@@ -595,6 +620,12 @@ def _model_attachment_error(model_id, attachments, label="The selected model") -
 
 # ---------- Static serving ----------
 
+@app.route("/favicon.ico")
+def favicon():
+    """Quiet the 404 browsers log for a tab icon this app does not ship."""
+    return "", 204
+
+
 @app.route("/")
 def index():
     page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -625,8 +656,72 @@ GLOBAL_MEMORY_FILE = COOKIE_FILE.parent / "memory.md"
 CONTEXT_WARN_CHARS = 80_000
 
 
+# Settings that exist once per track.  Arena keeps the classic top-level
+# config keys; the Google track stores its own values under "google_settings",
+# so memory, folder, permissions and the rest never leak between modes.
+_TRACK_CTX = threading.local()
+
+
+def _set_track(track: str) -> None:
+    _TRACK_CTX.track = track if track in ("arena", "google") else "arena"
+
+
+def _request_track() -> str:
+    """Which track a request belongs to: "arena" unless it says otherwise.
+
+    The request itself is the source of truth — a request without ``track`` is
+    an Arena one, even if the worker thread handled a Google request earlier.
+    The thread-local only covers work that outlives the request (a streaming
+    turn), where there is no request object left to ask.
+    """
+    try:
+        track = request.args.get("track") or ""
+        if not track and request.method != "GET":
+            body = request.get_json(silent=True) or {}
+            if isinstance(body, dict):
+                track = str(body.get("track") or "")
+        return "google" if str(track).lower() == "google" else "arena"
+    except Exception:
+        pass
+    current = getattr(_TRACK_CTX, "track", None)
+    return current if current in ("arena", "google") else "arena"
+
+
+def _google_scope() -> dict:
+    """Settings stored for the Google track only."""
+    scoped = load_config().get("google_settings")
+    return dict(scoped) if isinstance(scoped, dict) else {}
+
+
+def _settings_value(key, default=None):
+    """Read one setting from the track that is being addressed."""
+    if _request_track() == "google":
+        return _google_scope().get(key, default)
+    return load_config().get(key, default)
+
+
+def _settings_store(patch: dict) -> None:
+    """Write settings into the track that is being addressed."""
+    cfg = load_config()
+    if _request_track() == "google":
+        scoped = cfg.get("google_settings")
+        scoped = dict(scoped) if isinstance(scoped, dict) else {}
+        scoped.update(patch)
+        cfg["google_settings"] = scoped
+    else:
+        cfg.update(patch)
+    save_config(cfg)
+
+
+def _global_memory_file() -> Path:
+    """Memory notes: one file per track, side by side."""
+    if _request_track() == "google":
+        return GLOBAL_MEMORY_FILE.with_name("memory-google.md")
+    return GLOBAL_MEMORY_FILE
+
+
 def _memory_enabled() -> bool:
-    return load_config().get("memory_enabled") is not False
+    return _settings_value("memory_enabled", True) is not False
 
 
 def _read_memory_file(path: Path, cap: int) -> str:
@@ -1004,6 +1099,499 @@ def _signed_in_somewhere(client: ArenaClient) -> bool:
     return bool(client.cookie_str) or verified_engine or (_engine_on() and ENGINE.ready() and ENGINE.has_session())
 
 
+# ---------------------------------------------------------------------------
+# Startup readiness — the checks behind the loading screen
+# ---------------------------------------------------------------------------
+# The screen must not let anyone into the app until every requirement is met,
+# and each failing one has to say what to do next. The checks are deliberately
+# independent and cheap: the client re-runs them one at a time so a slow Google
+# window never holds up the file-integrity check.
+
+_ID_RE = None
+
+
+def _check_dependencies() -> dict:
+    """The interpreter, the UI libraries, and the pythonnet bridge.
+
+    The bridge check needs care in a PyInstaller build. ``Python.Runtime.dll``
+    and ``ClrLoader.dll`` are bundled *inside* the executable, not dropped
+    beside it: pythonnet loads them from the extraction directory, which only
+    exists once the app has unpacked itself. Looking for them next to the .exe
+    therefore failed on a perfectly good build — the startup screen refused to
+    let anyone in, on an install that was fine.
+
+    The rule here: the bridge is proven by *using* it. Importing ``clr`` inside
+    the frozen app exercises the same DLLs. A missing file is only reported
+    when that import actually fails.
+    """
+    import platform as _platform
+    import sys as _sys
+
+    problems = []
+    if _sys.version_info < (3, 10):
+        problems.append(f"Python {_platform.python_version()} is too old")
+
+    try:
+        import webview  # noqa: F401
+    except Exception as exc:
+        problems.append(f"pywebview is not importable: {exc}")
+
+    try:
+        import flask  # noqa: F401
+    except Exception as exc:
+        problems.append(f"Flask is not importable: {exc}")
+
+    # pythonnet bridge. Proven by importing, never by looking for files next to
+    # the .exe — the DLLs live inside the bundle and only exist after unpacking.
+    #
+    # Importing the bridge is deliberately NOT a hard failure. .NET refuses to
+    # initialise in some environments (wine is one) and can even abort the
+    # process; a missing bridge breaks Google mode only, while everything else
+    # works. Blocking the whole app on it would lock people out of a usable
+    # program. The window engine reports its own state separately, so this
+    # check stays informational and says exactly what it saw.
+    bridge = "not needed on this platform"
+    if _sys.platform.startswith("win") or getattr(_sys, "frozen", False):
+        try:
+            import clr  # noqa: F401
+            from System import Object  # noqa: F401
+            bridge = "pythonnet bridge loaded"
+        except BaseException as exc:
+            bridge = f"pythonnet bridge unavailable: {type(exc).__name__}"
+
+    ok = not problems
+    return {
+        "id": "dependencies",
+        "title": "Dependencies",
+        "ok": ok,
+        "detail": "; ".join(problems) if problems
+                  else f"Python {_platform.python_version()}, pywebview, Flask, {bridge}",
+        "action": None if ok else "Reinstall Arena Desktop.",
+    }
+
+
+def _check_integrity() -> dict:
+    """The static assets the UI needs, and the code that serves them."""
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parent
+    missing = []
+    for name in ("static/index.html", "static/app.js", "static/style.css"):
+        if not (root / name).exists():
+            missing.append(name.split("/")[-1])
+
+    if missing:
+        return {
+            "id": "integrity",
+            "title": "File integrity",
+            "ok": False,
+            "detail": "missing: " + ", ".join(missing),
+            "action": "Reinstall Arena Desktop; the UI files are damaged.",
+        }
+
+    # A truncated app.js still "exists" but the window renders blank, which is
+    # indistinguishable from a hang for the person looking at it.
+    app_js = root / "static" / "app.js"
+    size = app_js.stat().st_size
+    if size < 50_000:
+        return {
+            "id": "integrity",
+            "title": "File integrity",
+            "ok": False,
+            "detail": f"app.js is only {size} bytes",
+            "action": "Reinstall Arena Desktop; the UI files are damaged.",
+        }
+
+    return {
+        "id": "integrity",
+        "title": "File integrity",
+        "ok": True,
+        "detail": f"UI files present ({size // 1024} KB of app code)",
+        "action": None,
+    }
+
+
+def _check_accounts() -> dict:
+    """Check all saved Arena and Google accounts on startup; pass if at least one is valid."""
+    started = time.time()
+    client = get_client()
+    problems = []
+    detail = []
+    deadline = time.time() + 4.5
+
+    arena_signed = bool(getattr(client, "user", None) is not None)
+    if not arena_signed and client.cookie_str and time.time() < deadline:
+        user, _err = _check_session(client, force=False)
+        if isinstance(user, dict) and (user.get("email") or user.get("id")):
+            client.user = user
+            arena_signed = True
+    if arena_signed:
+        detail.append("Arena account signed in")
+
+    # If current Arena cookie failed or was empty, check other saved Arena accounts
+    if not arena_signed:
+        store = _accounts_load()
+        for rec in store.get("accounts") or []:
+            if time.time() >= deadline:
+                break
+            ck = str(rec.get("cookie") or "").strip()
+            if not ck or rec.get("expired"):
+                continue
+            try:
+                tmp_client = ArenaClient(cookie_str=ck, allow_cdp=False)
+                r = tmp_client.session.get(f"{BASE_URL}/api/me", timeout=2.5)
+                u = r.json().get("user") if r.status_code == 200 else None
+                if isinstance(u, dict) and (u.get("email") or u.get("id")):
+                    client.set_cookie(ck)
+                    client.user = u
+                    _write_cookie_file(ck)
+                    store["current"] = rec.get("id")
+                    _accounts_save(store)
+                    _me_cache.update(t=time.time(), user=u, err=None)
+                    arena_signed = True
+                    break
+            except Exception:
+                continue
+
+    google_signed = False
+    g_store = _google_accounts_load()
+    g_records = [a for a in (g_store.get("accounts") or []) if isinstance(a, dict) and a.get("cookie")]
+    g_current = g_store.get("current")
+    g_records.sort(key=lambda a: 0 if a.get("id") == g_current else 1)
+    for rec in g_records:
+        if time.time() >= deadline:
+            break
+        ck = str(rec.get("cookie") or "").strip()
+        if not ck or rec.get("expired"):
+            continue
+        try:
+            info = google_http.GoogleHTTP(ck, timeout=2.5).account()
+        except Exception:
+            info = {}
+        if info.get("signed_in"):
+            google_signed = True
+            if g_store.get("current") != rec.get("id"):
+                g_store["current"] = rec.get("id")
+                _google_accounts_save(g_store)
+            _google_flag_account(str(rec.get("id") or ""), ok=True)
+            break
+
+    if not google_signed:
+        google_engine = _google_engine()
+        if google_engine is not None:
+            try:
+                google_signed = bool(google_engine.state().get("signed_in"))
+            except Exception:
+                google_signed = False
+    if google_signed:
+        detail.append("Google session present")
+
+    if not arena_signed and not google_signed:
+        problems.append("no Arena account and no Google session")
+
+    ok = not problems
+    LOG.info("[startup-check] accounts ok=%s arena=%s google=%s in %.2fs (%s)",
+             ok, arena_signed, google_signed, time.time() - started, "; ".join(detail or problems))
+    return {
+        "id": "accounts",
+        "title": "Accounts",
+        "ok": ok,
+        "arena_signed_in": arena_signed,
+        "google_signed_in": google_signed,
+        "detail": "; ".join(detail) if detail else "; ".join(problems),
+        "action": None if ok else "Sign in to Arena or to Google.",
+        "optional": False,
+    }
+
+
+def _check_arena_chats() -> dict:
+    """Check saved Arena chats on startup."""
+    client = get_client()
+    has_arena = bool(getattr(client, "user", None) is not None or client.cookie_str)
+    try:
+        chats_dir = Path(CHATS_DIR)
+        files = [p for p in chats_dir.glob("*.json") if not p.name.startswith("google_")] if chats_dir.exists() else []
+        count = len(files)
+    except Exception as exc:
+        return {
+            "id": "arena_chats",
+            "title": "Arena chats",
+            "ok": False,
+            "optional": not has_arena,
+            "detail": f"Arena chats failed: {exc}",
+            "action": "Reload this step.",
+            "count": 0,
+        }
+    if not has_arena and count == 0:
+        return {
+            "id": "arena_chats",
+            "title": "Arena chats",
+            "ok": True,
+            "optional": True,
+            "detail": "Skipped (Arena account not signed in)",
+            "action": None,
+            "count": 0,
+        }
+    return {
+        "id": "arena_chats",
+        "title": "Arena chats",
+        "ok": True,
+        "optional": not has_arena,
+        "detail": f"{count} Arena chat{'' if count == 1 else 's'} loaded",
+        "action": None,
+        "count": count,
+    }
+
+
+def _check_google_chats() -> dict:
+    """Check saved Google AI chats / history store on startup."""
+    g_store = _google_accounts_load()
+    has_google = any(
+        isinstance(a, dict) and a.get("cookie") and not a.get("expired")
+        for a in (g_store.get("accounts") or [])
+    )
+    try:
+        chats_dir = Path(CHATS_DIR)
+        files = list(chats_dir.glob("google_*.json")) if chats_dir.exists() else []
+        count = len(files)
+    except Exception as exc:
+        return {
+            "id": "google_chats",
+            "title": "Google chats",
+            "ok": False,
+            "optional": not has_google,
+            "detail": f"Google chats failed: {exc}",
+            "action": "Reload this step.",
+            "count": 0,
+        }
+    if not has_google and count == 0:
+        return {
+            "id": "google_chats",
+            "title": "Google chats",
+            "ok": True,
+            "optional": True,
+            "detail": "Skipped (Google account not signed in)",
+            "action": None,
+            "count": 0,
+        }
+    return {
+        "id": "google_chats",
+        "title": "Google chats",
+        "ok": True,
+        "optional": not has_google,
+        "detail": f"{count} Google chat{'' if count == 1 else 's'} loaded",
+        "action": None,
+        "count": count,
+    }
+
+
+def _check_models() -> dict:
+    """The model catalog the composer needs.
+
+    An empty catalog has two very different meanings and the screen must not
+    confuse them: without a network the app legitimately runs on cached models
+    (or none), while a catalog that fails *while online* is a real fault.
+    """
+    try:
+        api_mod = contracts.api_modality(_ui_modality)
+        models = get_models_for_modality(_catalog_models(), api_mod, mode=_ui_mode)
+        models = models or []
+    except Exception as exc:
+        return {
+            "id": "models",
+            "title": "Models",
+            "ok": False,
+            "detail": f"the model list failed to load: {type(exc).__name__}: {exc}",
+            "action": "Retry; the model catalog could not be read.",
+            "count": 0,
+        }
+
+    if models:
+        count = len(models)
+        return {
+            "id": "models",
+            "title": "Models",
+            "ok": True,
+            "detail": f"{count} model{'' if count == 1 else 's'} available",
+            "action": None,
+            "count": count,
+        }
+
+    # Empty catalog: blame the network only if the network is really down.
+    online = True
+    try:
+        client = get_client()
+        online = bool(getattr(client, "reachable", True))
+    except Exception:
+        online = True
+
+    if not online:
+        return {
+            "id": "models",
+            "title": "Models",
+            "ok": True,          # offline is a state, not a failure of the app
+            "detail": "offline — the catalog will load once the network is back",
+            "action": None,
+            "count": 0,
+            "online": False,
+        }
+
+    # Empty while online: the catalog endpoint answers 403 to anonymous
+    # requests, so the usual cause is a missing sign-in, not a broken catalog.
+    # Saying which one it is matters — a person told "the catalog is failing"
+    # will retry forever instead of signing in.
+    client = get_client()
+    signed_in = bool(getattr(client, "user", None) is not None)
+    if not signed_in:
+        return {
+            "id": "models",
+            "title": "Models",
+            "ok": False,
+            "detail": ("the catalog answers 403 without a session, so the list "
+                       "is empty until you sign in"),
+            "action": "Sign in first; the models load with the session.",
+            "count": 0,
+            "needs_account": True,
+        }
+
+    return {
+        "id": "models",
+        "title": "Models",
+        "ok": False,
+        "detail": "the model list came back empty while online and signed in",
+        "action": "Retry; if it stays empty, the catalog request is failing.",
+        "count": 0,
+    }
+
+
+def _build_readiness(only_step: str | None = None) -> dict:
+    """Run startup readiness checks (all or a single requested step)."""
+    steps_map = {
+        "dependencies": _check_dependencies,
+        "integrity": _check_integrity,
+        "accounts": _check_accounts,
+        "arena_chats": _check_arena_chats,
+        "google_chats": _check_google_chats,
+        "models": _check_models,
+    }
+    if only_step and only_step in steps_map:
+        item = steps_map[only_step]()
+        return {"ok": bool(item.get("ok")), "items": [item]}
+
+    items = [fn() for fn in steps_map.values()]
+    acc = next((x for x in items if x.get("id") == "accounts"), {})
+    any_signed_in = bool(acc.get("arena_signed_in") or acc.get("google_signed_in"))
+    # If only Google is signed in, Arena models catalog 403 must not block startup
+    if any_signed_in and not acc.get("arena_signed_in"):
+        for it in items:
+            if it.get("id") in ("models", "arena_chats") and not it.get("ok"):
+                it["optional"] = True
+    all_ok = any_signed_in and all(it.get("ok") or it.get("optional") for it in items)
+    return {
+        "ok": all_ok,
+        "any_signed_in": any_signed_in,
+        "arena_signed_in": bool(acc.get("arena_signed_in")),
+        "google_signed_in": bool(acc.get("google_signed_in")),
+        "items": items,
+    }
+
+
+def _check_chats() -> dict:
+    """Combined chat check: passes if either Arena or Google chats load."""
+    arena = _check_arena_chats()
+    google = _check_google_chats()
+    ok = arena.get("ok", False) or google.get("ok", False)
+    count = arena.get("count", 0) + google.get("count", 0)
+    detail = []
+    if arena.get("detail"):
+        detail.append(arena["detail"])
+    if google.get("detail"):
+        detail.append(google["detail"])
+    return {
+        "id": "chats",
+        "title": "Chats",
+        "ok": ok,
+        "detail": "; ".join(detail) if ok else "Chats failed to load",
+        "action": None if ok else "Reload this step.",
+        "count": count,
+    }
+
+
+_READINESS_ORDER = ("dependencies", "integrity", "accounts", "arena_chats", "google_chats", "models")
+
+_READINESS_TITLES = {
+    "dependencies": "Dependencies",
+    "integrity": "File integrity",
+    "accounts": "Accounts",
+    "chats": "Chats",
+    "arena_chats": "Arena chats",
+    "google_chats": "Google chats",
+    "models": "Models",
+}
+
+_READINESS_CHECKS = {
+    "dependencies": _check_dependencies,
+    "integrity": _check_integrity,
+    "accounts": _check_accounts,
+    "arena_chats": _check_arena_chats,
+    "google_chats": _check_google_chats,
+    "models": _check_models,
+}
+
+
+@app.route("/api/readiness")
+def api_readiness():
+    """One check per call, so the screen can walk through them in order.
+
+    Without parameters returns the list of checks:
+        {"checks": [{"id": ..., "title": ...}, ...]}
+
+    With ``?check=<id>`` (or ``?step=<id>``) runs a single check and returns
+    the check object:
+        {"id": ..., "title": ..., "ok": ..., "detail": ..., "blocking": ..., ...}
+    """
+    name = (request.args.get("check") or request.args.get("step") or "").strip()
+
+    if not name:
+        return jsonify({
+            "checks": [
+                {"id": key, "title": _READINESS_TITLES[key]}
+                for key in _READINESS_ORDER
+            ],
+        })
+
+    fn = _READINESS_CHECKS.get(name)
+    if fn is None:
+        return jsonify({"ok": False, "error": f"unknown check {name!r}"}), 400
+
+    try:
+        result = fn()
+    except Exception as exc:
+        result = {
+            "id": name,
+            "title": _READINESS_TITLES.get(name, name.title()),
+            "ok": False,
+            "detail": f"the check itself failed: {type(exc).__name__}: {exc}",
+            "action": "Reload this step to retry.",
+        }
+
+    # If user signed in only to Google (not Arena), anonymous 403 on Arena models
+    # must be marked optional so "Continue anyway" or Google mode is not blocked.
+    if name == "models" and not result.get("ok"):
+        client = get_client()
+        if not getattr(client, "user", None) and not getattr(client, "cookie_str", None):
+            g_store = _google_accounts_load()
+            has_google = any(
+                isinstance(a, dict) and a.get("cookie") and not a.get("expired")
+                for a in (g_store.get("accounts") or [])
+            )
+            if has_google:
+                result["optional"] = True
+
+    result["blocking"] = not result.get("optional", False)
+    return jsonify(result)
+
+
 @app.route("/api/status")
 def api_status():
     client = get_client()
@@ -1033,6 +1621,7 @@ def api_status():
     # WebView2 cookie enumeration exposes an auth cookie. This adopts a
     # session already present in the persistent Arena window after restart.
     # _check_session caches the answer, so this is not a request per poll.
+    #
     user, err = _check_session(client, force=request.args.get("refresh") == "1")
     if user:
         merged = _user_identity(user, ident)
@@ -1056,6 +1645,7 @@ def api_status():
     return jsonify(out)
 
 
+@_diag_trace
 def _activate_cookie(cookie_str: str, method: str):
     """Adopt a cookie only after arena.ai confirms the session; returns (response, ok)."""
     global _client
@@ -1165,6 +1755,7 @@ _LOGIN_STEPS = ("In your own signed-in arena.ai tab: open DevTools Console, run 
 
 
 @app.route("/api/login", methods=["POST"])
+@_diag_trace
 def api_login():
     data = request.get_json(silent=True) or {}
     method = data.get("method") or ("auto" if data.get("auto") else "manual")
@@ -1215,24 +1806,32 @@ def api_login():
 
 
 @app.route("/api/login/poll")
+@_diag_trace
 def api_login_poll():
     """Sign-in window: report once the arena.ai page holds a confirmed account session."""
     if not _engine_on():
         return jsonify({"ok": False, "done": True, "error": "The sign-in window is part of the desktop app."})
     st = ENGINE.state()
-    if not ENGINE.ready():
-        if st["login_open"]:
-            return jsonify({"ok": False, "done": False, "hint": "Finish signing in in the arena.ai window."})
+    LOG.info("[arena-login] poll state=%s", st)
+    if not ENGINE.ready() and not st["login_open"]:
         return jsonify({"ok": False, "done": True, "error": "The sign-in window was closed before sign-in finished."})
+    if not ENGINE.ready():
+        return jsonify({"ok": False, "done": False, "hint": "Waiting for arena.ai to finish loading..."})
     # Check Arena's /me directly, even when WebView2 does not enumerate auth
+    # cookies. Falls back to _me_from_jar() when the page is not ready yet.
     # cookies. Do this once more after a manual close too: the user may have
     # completed sign-in and closed the window before the previous poll ran.
-    user, err = ENGINE.get_me()
+    try:
+        user, err = ENGINE.get_me(timeout=2.5)
+    except TypeError:
+        user, err = ENGINE.get_me()
     if not user or not _user_identity(user)["email"]:
         err = err or "Signed in as a guest only. Sign in with Google or email in the arena.ai window."
         login_open = ENGINE.state()["login_open"]
+        LOG.info("[arena-login] poll pending: err=%r login_open=%s", err, login_open)
         return jsonify({"ok": False, "done": not login_open, "hint": err,
                         "error": None if login_open else "The sign-in window was closed before sign-in finished."})
+    LOG.info("[arena-login] poll confirmed user=%s; closing window", _user_identity(user)["email"])
     ENGINE.sync_to(get_client())
     _me_cache.update(t=time.time(), user=user, err=None)
     _register_account(user, get_client().cookie_str)
@@ -1293,6 +1892,7 @@ def api_account_switch():
 
 
 @app.route("/api/accounts/add", methods=["POST"])
+@_diag_trace
 def api_account_add():
     """Open the sign-in window for a NEW account without signing the current
     one out: its stored session stays in the account list and can be
@@ -1335,23 +1935,78 @@ _SETTINGS_ALLOWLIST = frozenset({
     "memory_enabled", "persona", "show_reasoning", "auto_copy", "max_history", "browser",
 })
 
+# Keys that mean something per track (they follow the mode switch); the rest
+# stay app-wide, because a font size or a window layout is not a chat setting.
+_TRACKED_SETTING_KEYS = frozenset({
+    "workspace_dir", "default_mode", "default_modality", "model_a", "model_b",
+    "permission_mode", "memory_enabled", "gateway_enabled", "gateway_auto",
+    "gateway_servers", "gateway_workspace", "gateway_tunnel_protocol",
+    "persona", "show_reasoning", "auto_copy", "auto_continue", "elo_enabled",
+    "cheap_subagents", "multi_session_subagents", "account_failover", "pacing",
+    "pacing_preset", "browser", "agent_kind",
+})
+
+
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
     if request.method == "GET":
-        return jsonify(load_config())
+        cfg = load_config()
+        if _request_track() == "google":
+            view = dict(cfg)
+            view.update(_google_scope())
+            view["track"] = "google"
+            return jsonify(view)
+        return jsonify(cfg)
     data = request.get_json(silent=True) or {}
-    cfg = load_config()
-    cfg.update({key: value for key, value in data.items() if key in _SETTINGS_ALLOWLIST})
-    save_config(cfg)
-    return jsonify({"ok": True})
+    patch = {key: value for key, value in data.items() if key in _SETTINGS_ALLOWLIST}
+    shared = {k: v for k, v in patch.items() if k not in _TRACKED_SETTING_KEYS}
+    tracked = {k: v for k, v in patch.items() if k in _TRACKED_SETTING_KEYS}
+    if shared:
+        cfg = load_config()
+        cfg.update(shared)
+        save_config(cfg)
+    if tracked:
+        _settings_store(tracked)
+    return jsonify({"ok": True, "track": _request_track()})
+
+
+def _google_usage() -> dict:
+    """Usage for the Google track: its turns live in its own chats."""
+    import datetime
+    days: dict = {}
+    total = 0
+    for item in _list_chats():
+        if item.get("source") != "google":
+            continue
+        data = _load_chat(item["id"]) or {}
+        day = str(data.get("updated_at") or "")[:10] or datetime.date.today().isoformat()
+        sends = sum(1 for m in data.get("messages") or []
+                    if isinstance(m, dict) and m.get("role") == "assistant")
+        total += sends
+        bucket = days.setdefault(day, {})
+        row = bucket.setdefault("google-ai-mode", {"sends": 0, "by_modality": {},
+                                                   "rate_limits": 0, "models": {},
+                                                   "email": "Google AI mode"})
+        row["sends"] += sends
+        row["by_modality"]["text"] = row["by_modality"].get("text", 0) + sends
+        row["models"]["google-ai-mode"] = row["models"].get("google-ai-mode", 0) + sends
+    return {"today": datetime.date.today().isoformat(),
+            "current_account": "google-ai-mode",
+            "track": "google",
+            "total_sends": total,
+            "days": days,
+            "events": []}
 
 
 @app.route("/api/usage")
 def api_usage():
     import datetime
+    if _request_track() == "google":
+        return jsonify(_google_usage())
     store = _usage()
     return jsonify({"today": datetime.date.today().isoformat(),
                     "current_account": _current_account_id(),
+                    "track": "arena",
                     "days": store.get("days") or {},
                     "events": list(reversed(store.get("events") or []))})
 
@@ -1359,6 +2014,13 @@ def api_usage():
 @app.route("/api/gateway")
 def api_gateway():
     cfg = load_config()
+    if _request_track() == "google":
+        # The switch is stored per track; the Google track simply never
+        # exposes anything, so this is where its value is read from.
+        merged = dict(cfg)
+        merged.update({k: v for k, v in _google_scope().items()
+                       if k.startswith("gateway_")})
+        cfg = merged
     available = []
     try:
         for name, srv in (connectors.configured_servers() or {}).items():
@@ -1737,10 +2399,12 @@ def api_chat_compact(chat_id):
 @app.route("/api/memory")
 def api_memory_get():
     folder = _chosen_ws()
+    memory_file = _global_memory_file()
     return jsonify({
         "enabled": _memory_enabled(),
+        "track": _request_track(),
         "folder": str(folder) if folder else None,
-        "global": _read_memory_file(GLOBAL_MEMORY_FILE, 100_000),
+        "global": _read_memory_file(memory_file, 100_000),
         "workspace": (_read_memory_file(Path(folder) / MEMORY_FILE_NAME, 100_000)
                       if folder else None),
     })
@@ -1750,20 +2414,20 @@ def api_memory_get():
 def api_memory_save():
     data = request.get_json(silent=True) or {}
     folder = _chosen_ws()
+    memory_file = _global_memory_file()
     try:
         if isinstance(data.get("global"), str):
-            GLOBAL_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-            GLOBAL_MEMORY_FILE.write_text(data["global"], encoding="utf-8")
+            memory_file.parent.mkdir(parents=True, exist_ok=True)
+            memory_file.write_text(data["global"], encoding="utf-8")
         if isinstance(data.get("workspace"), str) and folder:
             Path(folder).mkdir(parents=True, exist_ok=True)
             (Path(folder) / MEMORY_FILE_NAME).write_text(data["workspace"], encoding="utf-8")
     except OSError as e:
         return jsonify({"error": f"Could not save memory: {e}", "code": "save_failed"}), 500
     if "enabled" in data:
-        cfg = load_config()
-        cfg["memory_enabled"] = bool(data.get("enabled"))
-        save_config(cfg)
+        _settings_store({"memory_enabled": bool(data.get("enabled"))})
     return jsonify({"ok": True, "enabled": _memory_enabled(),
+                    "track": _request_track(),
                     "folder": str(folder) if folder else None})
 
 
@@ -2793,7 +3457,7 @@ def _elo_fetch():
     r.raise_for_status()
     day = str((r.json() or {}).get("path") or "")
     models: dict = {}
-    for board in ("text", "code"):
+    for board in ("agent", "text", "code"):
         try:
             rr = requests.get(f"{base}/{day}/{board}.json", headers=headers, timeout=8)
             if rr.status_code != 200:
@@ -2981,10 +3645,17 @@ def _start_automation_scheduler():
     threading.Thread(target=loop, daemon=True).start()
 
 
+def _automation_track(item: dict) -> str:
+    return str(item.get("track") or "arena")
+
+
 @app.route("/api/automations")
 def api_automations_list():
+    track = _request_track()
     items = load_config().get("automations") or []
-    return jsonify({"items": [dict(item, permission="plan") for item in items if isinstance(item, dict)]})
+    return jsonify({"track": track,
+                    "items": [dict(item, permission="plan") for item in items
+                              if isinstance(item, dict) and _automation_track(item) == track]})
 
 
 @app.route("/api/automations", methods=["POST"])
@@ -2999,11 +3670,13 @@ def api_automations_save():
         return jsonify({"error": "Schedule must be 'daily HH:MM', 'hourly' or 'every Nm'.",
                         "code": "bad_request"}), 400
     permission = "plan"  # no unattended write or shell permissions
+    track = _request_track()
     cfg = load_config()
     items = list(cfg.get("automations") or [])
     aid = str(body.get("id") or "") or generate_uuidv7()
     entry = {"id": aid, "name": name[:80], "prompt": prompt[:4000], "schedule": schedule,
              "enabled": body.get("enabled") is not False, "permission": permission,
+             "track": track,
              "model": str(body.get("model") or "") or None,
              "last_run": 0}
     for i, it in enumerate(items):
@@ -3021,7 +3694,9 @@ def api_automations_save():
 @app.route("/api/automations/<aid>", methods=["DELETE"])
 def api_automations_delete(aid):
     cfg = load_config()
-    items = [it for it in (cfg.get("automations") or []) if str(it.get("id")) != str(aid)]
+    track = _request_track()
+    items = [it for it in (cfg.get("automations") or [])
+             if str(it.get("id")) != str(aid) or _automation_track(it) != track]
     cfg["automations"] = items
     save_config(cfg)
     return jsonify({"ok": True})
@@ -3029,6 +3704,11 @@ def api_automations_delete(aid):
 
 @app.route("/api/automations/<aid>/run", methods=["POST"])
 def api_automations_run(aid):
+    if _request_track() == "google":
+        return jsonify({"error": "Scheduled runs start Arena Agent chats. Google AI mode "
+                                 "automations are kept here for their own track and run "
+                                 "from the Arena track.",
+                        "code": "wrong_track"}), 400
     item = next((it for it in (load_config().get("automations") or [])
                  if str(it.get("id")) == str(aid)), None)
     if not item:
@@ -3381,8 +4061,14 @@ def _arena_post_json(path: str, payload: dict, timeout: float = 30):
     if status == 0:
         return None, (f"Can't reach arena.ai: {detail}" if detail else "Can't reach arena.ai"), status
     if status in (401, 403):
+        LOG.info("arena POST %s -> HTTP %s via %s: %s", path, status,
+                 "engine" if _engine_on() else "session",
+                 " ".join((text or "").split())[:200])
         return None, "Arena session is not signed in or has expired", status
     if status != 200:
+        LOG.info("arena POST %s -> HTTP %s via %s: %s", path, status,
+                 "engine" if _engine_on() else "session",
+                 " ".join((text or "").split())[:200])
         return None, f"arena.ai returned HTTP {status}", status
     try:
         return json.loads(text), None, status
@@ -3509,6 +4195,7 @@ def api_arena_chat_open(eval_id):
 
 
 LOG = logging.getLogger("arena.desktop")
+
 _tl = threading.local()  # per request: the last error shown to the user, kept in the chat history
 
 
@@ -3539,13 +4226,13 @@ def _sse_wrap(gen, chat_id=None):
 
 
 def _workspace_dir() -> Path:
-    raw = load_config().get("workspace_dir")
+    raw = _settings_value("workspace_dir")
     return Path(raw).expanduser() if raw else workspace.PROJECTS_DIR / "workspace"
 
 
 def _chosen_ws() -> Optional[Path]:
-    """The folder the user picked in the composer, or None when they have not picked one."""
-    raw = load_config().get("workspace_dir")
+    """The folder picked for the track being addressed (Arena by default)."""
+    raw = _settings_value("workspace_dir")
     return Path(raw).expanduser() if raw else None
 
 
@@ -3628,7 +4315,7 @@ def _wait_for(check, seconds: int):
         value = check()
         if value or _stopped():
             return value
-        time.sleep(1)
+        time.sleep(POLL_TICK)
         if i % 10 == 9:
             yield _sse({"type": "ping"})
     return check()
@@ -3749,7 +4436,7 @@ def _collect_webdev_previews(client, conv):
                 pending.pop(lane, None)
         if pending and attempt < 2:
             yield _sse({"type": "ping"})
-            time.sleep(1)
+            time.sleep(POLL_TICK)
 
 
 def _webdev_event(lane: str, item: dict, conv: dict):
@@ -5047,22 +5734,83 @@ def _native_connected_slugs():
             if item.get("connected") and item.get("slug") and item["slug"] not in off]
 
 
-def _native_pat(session_id, timezone, start=False):
-    """Mint or refresh the Trigger session PAT through Arena. Returns (pat, error)."""
-    if start:
-        data, error, _ = _arena_post_json(
-            contracts.PATHS["chat_trigger_session"],
-            {"sessionId": session_id, "timezone": timezone or native_agent.DEFAULT_TIMEZONE},
-            timeout=35)
-        if not error and isinstance(data, dict) and data.get("publicAccessToken"):
-            return data["publicAccessToken"], None
-        if error:
-            return None, error
-    data, error, _ = _arena_post_json(
-        contracts.PATHS["chat_trigger_token"], {"sessionId": session_id}, timeout=35)
-    if not error and isinstance(data, dict) and data.get("token"):
-        return data["token"], None
-    return None, error or "arena.ai did not return an agent access token"
+_NATIVE_OUT_OVERRIDE: dict = {}  # trigger address -> the .out url this build serves
+
+
+def _native_out_url(address) -> str:
+    """The reader URL for a session: probed override first, the event feed second."""
+    key = str(address)
+    return _NATIVE_OUT_OVERRIDE.get(key) or native_agent.chat_events_url(contracts.ORIGIN, key)
+
+
+def _native_probe_out(client, address, pat):
+    """Find which .out URL this Arena build answers; remember the winner.
+
+    Append keeps working across releases while the session reader URL has
+    drifted before, so a 404 on .out is settled by a short probe instead of
+    a user-facing error.
+    """
+    key = str(address)
+    for url in native_agent.out_url_candidates(contracts.ORIGIN, key):
+        if _NATIVE_OUT_OVERRIDE.get(key) == url:
+            continue
+        try:
+            probe = requests.get(url, headers=_native_headers(
+                client, native_agent.stream_headers(pat, None)), stream=True, timeout=(10, 12))
+        except requests.RequestException as e:
+            LOG.info("native probe: %s -> error %s", url, e)
+            continue
+        code = probe.status_code
+        try:
+            head = " ".join((probe.text or "").split())[:120]
+        except Exception:
+            head = ""
+        probe.close()
+        LOG.info("native probe: %s -> HTTP %s %s", url, code, head)
+        if code == 200:
+            _NATIVE_OUT_OVERRIDE[key] = url
+            LOG.info("native probe: using %s for this session", url)
+            return url
+    return None
+
+
+def _native_coords(session_id, timeout=35):
+    """Authoritative session coordinates from the chat snapshot.
+
+    The website resumes an agent chat by loading ``GET /api/chat/:id`` and
+    reading the bootstrap it returns (trigger address + public access
+    token). That snapshot is therefore the source of truth when the create
+    reply was cut short or its token has rotated.
+    """
+    data, error, status = _arena_get_json(
+        contracts.PATHS["chat_session"].format(session_id=urllib.parse.quote(str(session_id))),
+        timeout=timeout)
+    if error or not isinstance(data, (dict, list)):
+        return None, None, error or f"HTTP {status}"
+    address, pat = native_agent.coordinates(data)
+    LOG.info("native coords: %s -> address=%s pat=%s",
+             session_id, "yes" if address else "no", "yes" if pat else "no")
+    return address, pat, None
+
+
+def _native_start_session(session_id, timezone):
+    """Start (or reopen) the agent session: POST /api/chat/:id/session.
+
+    Arena replaced the old ``trigger-session``/``trigger-token`` pair with a
+    single route. It returns no token: the website's own transport now shows
+    a placeholder access token and lets Arena's proxy attach the real one, so
+    every request carries the account cookies only.
+    """
+    data, error, status = _arena_post_json(
+        native_agent.chat_session_path(session_id),
+        {"timezone": timezone or native_agent.DEFAULT_TIMEZONE},
+        timeout=45)
+    if error:
+        LOG.info("native session: start failed for %s (HTTP %s): %s",
+                 session_id, status, error)
+        return False, error
+    LOG.info("native session: started %s (HTTP %s)", session_id, status)
+    return True, None
 
 
 def _native_headers(client, base):
@@ -5073,16 +5821,29 @@ def _native_headers(client, base):
     return headers
 
 
-def _native_append(client, trigger_address, pat, payload):
-    """Append one input record to the agent session. Returns (seq|None, http_status)."""
+def _native_append(client, trigger_address, pat, payload, part_id=None):
+    """Append one input record to the agent session. Returns (seq|None, http_status).
+
+    ``X-Part-Id`` is the append's identity: a retry must carry the same one,
+    otherwise Arena reads it as a second message.
+    """
+    headers = native_agent.append_headers(pat)
+    if part_id:
+        headers["X-Part-Id"] = part_id
     try:
         resp = requests.post(
-            native_agent.in_url(contracts.ORIGIN, trigger_address),
-            headers=_native_headers(client, native_agent.append_headers(pat)),
+            native_agent.chat_input_url(contracts.ORIGIN, trigger_address),
+            headers=_native_headers(client, headers),
             json=payload, timeout=30)
     except requests.RequestException:
         return None, 0
     if resp.status_code != 200:
+        try:
+            head = " ".join((resp.text or "").split())[:200]
+        except Exception:
+            head = ""
+        LOG.info("native append: HTTP %s for %s %s", resp.status_code,
+                 native_agent.chat_input_url(contracts.ORIGIN, trigger_address), head)
         return None, resp.status_code
     try:
         data = resp.json()
@@ -5142,7 +5903,18 @@ def _native_create_session(message, timezone, connectors, files=None):
                 boot = native_agent.parse_bootstrap(payload)
                 if not boot["session_id"]:
                     return None, "arena.ai did not return an agent session id"
-                LOG.info("native create [%s]: session %s", label, boot["session_id"])
+                boot_block = payload.get("bootstrap") if isinstance(payload.get("bootstrap"), dict) else {}
+                LOG.info("native create [%s]: session %s bootstrap_keys=%s pat=%s",
+                         label, boot["session_id"], sorted(boot_block.keys()),
+                         "yes" if boot["pat"] else "no")
+                if not boot["pat"]:
+                    # Older/updated servers may drop publicAccessToken from the
+                    # create reply; the chat snapshot carries it instead.
+                    address, pat, _err = _native_coords(boot["session_id"])
+                    if pat:
+                        boot["pat"] = pat
+                    if address and not boot["trigger_address"]:
+                        boot["trigger_address"] = address
                 return boot, None
             err = contracts.classify_error(r.status_code, text if r.status_code else (r.error or ""),
                                            headers=getattr(r, "headers", None))
@@ -5509,15 +6281,15 @@ def _native_drain_cursor(client, session_id, trigger_address, pat, timezone, max
         headers["Timeout-Seconds"] = "20"  # draining must stay quick
         try:
             resp = requests.get(
-                native_agent.out_url(contracts.ORIGIN, trigger_address),
+                _native_out_url(trigger_address),
                 headers=_native_headers(client, headers),
                 stream=True, timeout=(15, 60))
         except requests.RequestException:
             break
         if resp.status_code in (401, 403):
             resp.close()
-            pat, _ = _native_pat(session_id, timezone, start=False)
-            if not pat:
+            ok, _err = _native_start_session(session_id, timezone)
+            if not ok:
                 break
             continue
         if resp.status_code != 200:
@@ -5603,10 +6375,14 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
                 trigger_address = data.get("triggerAddress")
             trigger_address = trigger_address or session_id
         if not pat:
-            pat, perr = _native_pat(session_id, timezone, start=True)
-            if not pat:
-                yield fail(perr or "Could not get an agent session token.")
-                return result
+            _addr, pat, _cerr = _native_coords(session_id)
+            if pat:
+                LOG.info("native: PAT recovered from the chat snapshot for %s", session_id)
+        pat = None  # cookies only: Arena's proxy owns the session token
+        ok, perr = _native_start_session(session_id, timezone)
+        if not ok:
+            LOG.info("native: session start failed for %s (%s); trying the event "
+                     "feed anyway", session_id, perr)
         publish_native()  # trigger_address may have been resolved above
     else:
         if not trigger_address:
@@ -5619,10 +6395,11 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
         # Direct append, like the website's transport: a fresh genuine cx in
         # the turn metadata when the page can mint one, plain otherwise.
         pre = ENGINE.native_preflight(native_agent.RECAPTCHA_V3_ACTION)
-        pat, perr = _native_pat(session_id, timezone, start=True)
-        if not pat:
-            yield fail(perr or "Could not get an agent session token.")
-            return result
+        pat = None  # cookies only: Arena's proxy owns the session token
+        ok, perr = _native_start_session(session_id, timezone)
+        if not ok:
+            LOG.info("native: session start failed for existing %s (%s); "
+                     "continuing anyway", session_id, perr)
         if needs_drain or not last_event_id:
             # Old/imported session: resume the way the website does — take
             # the authoritative cursor from the session snapshot. Only if
@@ -5645,15 +6422,16 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
             LOG.info("native resume: drained imported session to cursor %s", last_event_id)
         payload = native_agent.build_append_body(message, trigger_address, timezone,
                                                  connectors, cx=pre.get("cx"), files=files)
-        _, status = _native_append(client, trigger_address, pat, payload)
-        if status in (401, 403):
-            pat, _ = _native_pat(session_id, timezone, start=False)
-            if pat:
-                _, status = _native_append(client, trigger_address, pat, payload)
-        if status == 404:
-            pat, _ = _native_pat(session_id, timezone, start=True)
-            if pat:
-                _, status = _native_append(client, trigger_address, pat, payload)
+        part_id = native_agent.new_uuid()
+        _, status = _native_append(client, trigger_address, pat, payload, part_id=part_id)
+        if status in (401, 403, 404):
+            addr, snap_pat, _cerr = _native_coords(session_id)
+            if addr and addr != trigger_address:
+                trigger_address = addr
+            if snap_pat and snap_pat != pat:
+                pat = snap_pat
+            _native_start_session(session_id, timezone)
+            _, status = _native_append(client, trigger_address, pat, payload, part_id=part_id)
         LOG.info("native append: HTTP %s (cx=%s)", status, "genuine" if pre.get("cx") else "none")
         if status != 200:
             yield fail(f"Could not send the message to the agent (HTTP {status}).")
@@ -5680,6 +6458,10 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
     last_activity = time.monotonic()
     deadline = time.monotonic() + 1800
     cycles = 0
+    stream_failures = 0
+    coords_refreshed = False
+    probed_out = False
+    session_restarted = False
 
     def promote_unresolved_questions():
         # Native ask_user may stop at input-available without emitting the
@@ -5712,7 +6494,8 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
         """Answer every waiting Arena capability, append the results to the
         same durable session, and reset the subscribe state for its reply."""
         nonlocal pat, turn_done, saw_record, last_activity, deadline, cycles
-        nonlocal turn_started, turn_content_seen
+        nonlocal turn_started, turn_content_seen, stream_failures, coords_refreshed
+        nonlocal probed_out, session_restarted
         batch = list(pending_hitl)
         pending_hitl.clear()
         hitl_pause.update({"since": None, "now": False})
@@ -5764,15 +6547,12 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
                 LOG.exception("native HITL: preflight failed")
         payload = native_agent.build_hitl_append_body(
             results, trigger_address, timezone, connectors, cx=cx)
-        _, append_status = _native_append(client, trigger_address, pat, payload)
-        if append_status in (401, 403):
-            pat, _ = _native_pat(session_id, timezone, start=False)
-            if pat:
-                _, append_status = _native_append(client, trigger_address, pat, payload)
-        if append_status == 404:
-            pat, _ = _native_pat(session_id, timezone, start=True)
-            if pat:
-                _, append_status = _native_append(client, trigger_address, pat, payload)
+        part_id = native_agent.new_uuid()
+        _, append_status = _native_append(client, trigger_address, pat, payload, part_id=part_id)
+        if append_status in (401, 403, 404):
+            _native_start_session(session_id, timezone)
+            _, append_status = _native_append(client, trigger_address, pat, payload,
+                                              part_id=part_id)
         LOG.info("native HITL append: HTTP %s tools=%s cx=%s", append_status,
                  ",".join(item["tool"] for item in results), "genuine" if cx else "none")
         if append_status != 200:
@@ -5825,6 +6605,10 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
         last_activity = time.monotonic()
         deadline = time.monotonic() + 1800
         cycles = 0
+        stream_failures = 0
+        coords_refreshed = False
+        probed_out = False
+        session_restarted = False
         publish_native()
         return True
     while not turn_done and cycles < 24 and time.monotonic() < deadline:
@@ -5835,25 +6619,61 @@ def _native_agent_run(client, message: str, existing: dict, timezone, result=Non
             break
         try:
             resp = requests.get(
-                native_agent.out_url(contracts.ORIGIN, trigger_address),
+                _native_out_url(trigger_address),
                 headers=_native_headers(client, native_agent.stream_headers(pat, last_event_id)),
                 stream=True, timeout=(15, 150))
         except requests.RequestException:
             time.sleep(2)
             continue
-        if resp.status_code in (401, 403):
+        if resp.status_code in (401, 403, 404):
+            status = resp.status_code
+            try:
+                body_head = " ".join((resp.text or "").split())[:200]
+            except Exception:
+                body_head = ""
+            url_head = native_agent.out_url(contracts.ORIGIN, trigger_address)
             resp.close()
-            pat, _ = _native_pat(session_id, timezone, start=False)
-            if not pat:
-                yield fail("The agent session token expired and did not refresh.")
+            LOG.info("native stream: HTTP %s for %s (pat=%s) %s", status, url_head,
+                     "yes" if pat else "no", body_head)
+            # The chat snapshot is what the website itself resumes from: it
+            # carries the current trigger address and public access token.
+            refreshed = False
+            if not coords_refreshed:
+                coords_refreshed = True
+                addr, snap_pat, cerr = _native_coords(session_id)
+                if snap_pat and snap_pat != pat:
+                    pat = snap_pat
+                    refreshed = True
+                    LOG.info("native stream: PAT refreshed from the chat snapshot")
+                if addr and addr != trigger_address:
+                    trigger_address = addr
+                    refreshed = True
+                    LOG.info("native stream: trigger address refreshed -> %s", addr)
+                elif cerr:
+                    LOG.info("native stream: chat snapshot unavailable (%s)", cerr)
+            if refreshed:
+                stream_failures = 0
+                continue
+            if status in (401, 403) and not session_restarted:
+                session_restarted = True
+                ok, _serr = _native_start_session(session_id, timezone)
+                if ok:
+                    stream_failures = 0
+                    continue
+            if status == 404 and not probed_out:
+                probed_out = True
+                if _native_probe_out(client, trigger_address, pat):
+                    stream_failures = 0
+                    continue
+            stream_failures += 1
+            LOG.info("native stream: HTTP %s, retry %s/5", status, stream_failures)
+            if stream_failures >= 5:
+                if status == 404:
+                    yield fail("The agent session was not found on Arena.")
+                else:
+                    yield fail("The agent session token expired and did not refresh.")
                 break
-            continue
-        if resp.status_code == 404:
-            resp.close()
-            pat, _ = _native_pat(session_id, timezone, start=True)
-            if not pat:
-                yield fail("The agent session was not found on Arena.")
-                break
+            time.sleep(2 if status != 404 else 3)
             continue
         if resp.status_code != 200:
             status = resp.status_code
@@ -7708,13 +8528,1493 @@ def api_chat():
         return _api_chat_impl()
 
 
+GOOGLE_ENGINE = None  # set by desktop.py: the google.com WebView driver
+GOOGLE_ACCOUNTS_FILE = lambda: CHATS_DIR.parent / "google_accounts.json"  # type: ignore[assignment]
+
+
+@_diag_trace
+def _google_engine():
+    """The Google driver, or None in a build without the desktop windows."""
+    return GOOGLE_ENGINE
+
+_GOOGLE_HTTP_ACCOUNT = {"key": None, "at": 0.0, "info": None}
+_GOOGLE_ACCOUNT_TTL = 45.0  # seconds: a status poll must not hammer Google
+
+
+@_diag_trace
+def _google_current_cookie() -> str:
+    """The cookie header of the Google account in use, or "" when none."""
+    store = _google_accounts_load()
+    record = None
+    for acc in store.get("accounts") or []:
+        if isinstance(acc, dict) and acc.get("id") == store.get("current"):
+            record = acc
+            break
+    if record is not None and not record.get("cookie"):
+        # The account was saved by a path that failed to export the jar. The
+        # window may still hold the session, so take it from there once and
+        # write it back — otherwise every send and every history refresh says
+        # "no Google session" while the person is visibly signed in.
+        engine = _google_engine()
+        if (engine is not None and getattr(engine, "window", None) is not None
+                and not getattr(engine, "quiet_now", lambda: False)()):
+            # engine.cookies() читает куки Edge через WebView2 на UI-потоке;
+            # застрявшее окно держит GIL в ожидании DCOM и замораживает весь
+            # процесс. Читаем на отдельном потоке с жёстким таймаутом.
+            import threading as _threading
+            _jar_box: dict = {}
+
+            def _read_jar():
+                try:
+                    _jar_box["jar"] = engine.cookies(tries=1)
+                except Exception:
+                    _jar_box["jar"] = ""
+
+            _t = _threading.Thread(target=_read_jar, daemon=True, name="google-jar")
+            _t.start()
+            _t.join(2.5)
+            jar = _jar_box.get("jar", "")
+            if _t.is_alive():
+                LOG.info("google current cookie: jar read stalled; skipping")
+                jar = ""
+            if jar:
+                record["cookie"] = jar
+                _google_accounts_save(store)
+                LOG.info("google account %s: cookie recovered from the window",
+                         record.get("id"))
+    accounts = [a for a in (store.get("accounts") or [])
+                if isinstance(a, dict) and a.get("cookie")]
+    if not accounts:
+        return ""
+    current = store.get("current")
+    for acc in accounts:
+        if acc.get("id") == current:
+            return str(acc.get("cookie") or "")
+    return str(accounts[0].get("cookie") or "")
+
+
+@_diag_trace
+def _google_http_client(hl: str = "", cookie: str = ""):
+    """A ready HTTP transport, or None when there is no usable session."""
+    raw = cookie or _google_current_cookie()
+    if not raw:
+        return None
+    client_cls = getattr(google_http, "GoogleHTTP", None)
+    if client_cls is None:
+        return None
+    try:
+        return client_cls(raw, hl=(hl or str(_google_prefs().get("hl") or "ru")))
+    except google_http.GoogleHTTPError:
+        return None
+
+
+@_diag_trace
+def _google_http_account(cookie: str = "") -> dict:
+    """Who Google says is signed in, over HTTP, cached for a few seconds."""
+    raw = cookie or _google_current_cookie()
+    if not raw:
+        return {}
+    key = (hash(raw), )
+    now = time.time()
+    cache = _GOOGLE_HTTP_ACCOUNT
+    if cache.get("key") == key and now - float(cache.get("at") or 0) < _GOOGLE_ACCOUNT_TTL:
+        return dict(cache.get("info") or {})
+    client = _google_http_client(cookie=raw)
+    if client is None:
+        return {}
+    try:
+        info = client.account()
+    except google_http.GoogleHTTPError as exc:
+        LOG.info("google http account check failed: %s", exc.code)
+        return {}
+    except Exception:
+        LOG.exception("google http account check crashed")
+        return {}
+    _GOOGLE_HTTP_ACCOUNT.update({"key": key, "at": now, "info": dict(info)})
+    return info
+
+
+# --- Supervisor mode -------------------------------------------------------
+# Google AI mode has no tool protocol, and Google refuses prompts that try to
+# install one (see HANDOFF.md). So the protocol lives on the *executor* side:
+# an Arena Agent chat receives Google's answer as a brief and reports back with
+# "ASK:" lines when it needs material only the planner can supply.
+_ASK_RE = re.compile(r"^[ \t]*ASK(?:-PLANNER)?[ \t]*:[ \t]*(.+?)[ \t]*$", re.M | re.I)
+
+
+def _supervisor_questions(text: str) -> list:
+    """The questions an executor asked its planner, in order."""
+    return [m.group(1).strip() for m in _ASK_RE.finditer(text or "") if m.group(1).strip()]
+
+
+def _supervisor_strip_asks(text: str) -> str:
+    cleaned = _ASK_RE.sub("", text or "")
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _supervisor_brief(user_message: str, brief: str, workspace: str, step: int,
+                      steps: int, ru: bool = True) -> str:
+    """The executor's standing orders: do exactly this, invent nothing."""
+    if ru:
+        head = (
+            "[Arena Desktop · режим руководителя]\n"
+            "Ты — исполнитель. Руководитель (Google AI mode) уже составил план, "
+            "твоя работа — выполнить его на этом компьютере и вернуть результат. "
+            "Не придумывай новых задач и не меняй план по своему желанию.\n\n"
+            f"Запрос человека: {user_message}\n\n"
+            f"Указание руководителя:\n{brief[:6000]}\n\n"
+        )
+        rules = (
+            f"Рабочая папка: {workspace or 'не выбрана'}.\n"
+            "Правила:\n"
+            "1. Делай ровно то, что просит руководитель, и ничего сверх этого.\n"
+            "2. Если для работы не хватает материала, который может дать только "
+            "руководитель (текст, данные, решение), не выдумывай его: последней "
+            "строкой ответа напиши «ASK: <вопрос>» и останови работу.\n"
+            "3. Если всё сделано, верни короткий отчёт: что сделано, где лежит "
+            "результат, что осталось спорным. Без «ASK» в этом случае.\n"
+        )
+    else:
+        head = (
+            "[Arena Desktop · supervisor mode]\n"
+            "You are the executor. The planner (Google AI mode) has already written "
+            "the plan; your job is to carry it out on this computer and report back. "
+            "Do not invent extra work and do not change the plan on your own.\n\n"
+            f"The person's request: {user_message}\n\n"
+            f"The planner's instruction:\n{brief[:6000]}\n\n"
+        )
+        rules = (
+            f"Working folder: {workspace or 'not chosen'}.\n"
+            "Rules:\n"
+            "1. Do exactly what the planner asks, nothing beyond it.\n"
+            "2. If you lack material only the planner can supply (text, data, a "
+            "decision), do not make it up: end your reply with a line "
+            "«ASK: <question>» and stop.\n"
+            "3. When the work is done, return a short report: what was done, where "
+            "the result is, what is still uncertain. No «ASK» in that case.\n"
+        )
+    if step > 0:
+        head += (f"(Итерация {step + 1} из {steps}.)\n" if ru else
+                 f"(Iteration {step + 1} of {steps}.)\n")
+    return head + rules
+
+
+def _supervisor_followup(questions: list, answers: str, ru: bool = True) -> str:
+    q = "; ".join(questions)[:600]
+    if ru:
+        return ("[Руководитель] Ответ на твой вопрос: " + q + "\n\n" + answers[:4000] +
+                "\n\nПродолжай работу. Если снова чего-то не хватает — снова напиши "
+                "«ASK: <вопрос>» последней строкой.")
+    return ("[Planner] Answer to your question: " + q + "\n\n" + answers[:4000] +
+            "\n\nContinue the work. If something is still missing, end with "
+            "«ASK: <question>» again.")
+
+
+def _supervisor_conv(chat_id: str, title: str) -> dict:
+    """The agent conversation an executor chat runs in (same shape as Agent mode)."""
+    return {
+        "eval_id": None, "new": True, "mode": contracts.api_mode("agent"),
+        "modality": contracts.api_modality("text"), "model_a": None, "model_b": None,
+        "chat_id": chat_id, "title": title, "auto_model": True,
+        "reasoning": {"a": "", "b": ""}, "lane_errors": {"a": [], "b": []},
+        "attachments": None, "guide_sent": False, "mcp_guide_hash": None,
+        "memory_hash": None, "delegate_sent": False, "previews": set(),
+        "mirror_ok": True, "tools": [], "permission_mode": _perm_mode(),
+    }
+
+
+def _supervisor_run(client, google_chat_id: str, title: str, user_message: str,
+                    brief: str, steps: int, planner, ru: bool = True):
+    """Drive one Arena Agent chat as the executor; returns (report, chat_id)."""
+    steps = max(1, min(int(steps or 4), 12))
+    executor_id = str(uuid.uuid4())
+    exec_title = ("Supervisor · " + (title or "Google AI mode task"))[:80]
+    _save_chat(executor_id, title=exec_title, messages=[], mode="agent",
+               modality="text", source="arena", supervisor_of=google_chat_id)
+    conv = _supervisor_conv(executor_id, exec_title)
+    workspace = str(_chosen_ws() or "")
+    yield _sse({"type": "supervisor", "state": "started", "chat_id": executor_id,
+                "title": exec_title, "steps": steps})
+    instruction = _supervisor_brief(user_message, brief, workspace, 0, steps, ru)
+    history = []
+    report = ""
+    raw = ""
+    for step in range(steps):
+        out = yield from _agent_run(client, instruction, conv)
+        raw = (out or {}).get("a") or ""
+        questions = _supervisor_questions(raw)
+        clean = _supervisor_strip_asks(raw)
+        history.append({"role": "assistant", "text": clean})
+        if questions and step + 1 < steps and planner is not None:
+            yield _sse({"type": "supervisor", "state": "asking",
+                        "question": "; ".join(questions)[:400], "step": step + 1})
+            answer_text = ""
+            try:
+                answer_text = (planner.ask("; ".join(questions)) or {}).get("text") or ""
+            except Exception as exc:  # the planner being down must not lose the work
+                LOG.info("supervisor: planner did not answer: %s", exc)
+            if not answer_text:
+                yield _sse({"type": "notice", "level": "warn",
+                            "text": "Google AI mode did not answer the executor's question; "
+                                    "finishing with what is already done."})
+                report = clean
+                break
+            yield _sse({"type": "supervisor", "state": "answer",
+                        "text": answer_text[:1500]})
+            instruction = _supervisor_followup(questions, answer_text, ru)
+            history.append({"role": "assistant", "text": "ASK: " + "; ".join(questions)})
+            history.append({"role": "user", "text": answer_text})
+            conv["guide_sent"] = True  # the executor already knows the tool protocol
+            try:
+                _save_chat(executor_id, title=exec_title, messages=history, mode="agent",
+                           modality="text", source="arena", supervisor_of=google_chat_id)
+            except Exception:
+                LOG.exception("supervisor: saving the executor chat failed")
+            continue
+        report = clean or raw
+        break
+    if not report:
+        report = _supervisor_strip_asks(raw)
+    history.append({"role": "assistant", "text": report})
+    try:
+        _save_chat(executor_id, title=exec_title, messages=history, mode="agent",
+                   modality="text", source="arena", supervisor_of=google_chat_id)
+    except Exception:
+        LOG.exception("supervisor: saving the executor chat failed")
+    yield _sse({"type": "supervisor", "state": "done", "chat_id": executor_id,
+                "title": exec_title, "report": report[:4000]})
+    return report, executor_id
+
+
+_GOOGLE_CONTEXT_CHARS = 1400  # how much of the previous answer rides along
+
+
+def _google_plain(text: str) -> str:
+    """Markdown → one line, so a follow-up can quote the previous answer."""
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text or "")
+    text = re.sub(r"[*_`#>]+", "", text)
+    return " ".join(text.split())
+
+
+def _google_compose_query(message: str, history: list, hl: str = "ru") -> str:
+    """Carry the thread Google will not remember itself.
+
+    AI mode keeps conversations on Google's side, but continuing one needs
+    one-shot tokens that cannot be replayed (see HANDOFF.md). So a follow-up is
+    sent as a single query that quotes the previous exchange — otherwise
+    "а подробнее?" has nothing to attach to.
+    """
+    pairs = [m for m in (history or [])
+             if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+             and str(m.get("text") or "").strip()]
+    if not pairs:
+        return message
+    ru = str(hl or "").lower().startswith("ru")
+    head = "Продолжение диалога в режиме ИИ." if ru else "Continuing a conversation."
+    ask = "Новый вопрос" if ru else "New question"
+    q_label = "Вопрос" if ru else "Question"
+    a_label = "Ответ" if ru else "Answer"
+    parts = []
+    budget = _GOOGLE_CONTEXT_CHARS
+    for item in pairs[-2:]:
+        text = _google_plain(item.get("text"))
+        if len(text) > budget:
+            text = text[:budget].rsplit(" ", 1)[0] + "…"
+        parts.append(f"{q_label if item.get('role') == 'user' else a_label}: {text}")
+        budget -= len(text)
+        if budget < 200:
+            break
+    if not parts:
+        return message
+    return head + "\n" + "\n".join(parts) + f"\n\n{ask}: " + message
+
+
+def _google_forget_account_cache():
+    _GOOGLE_HTTP_ACCOUNT.update({"key": None, "at": 0.0, "info": None})
+
+
+def _google_prefs() -> dict:
+    """Settings that belong to Google AI mode alone."""
+    cfg = load_config()
+    prefs = cfg.get("google_prefs")
+    base = {"hl": "en", "show_window": False, "keep_citations": True,
+            "supervisor": False, "supervisor_steps": 6}
+    if isinstance(prefs, dict):
+        base.update({k: prefs[k] for k in base if k in prefs})
+        for key in ("hl", "show_window", "keep_citations", "supervisor", "supervisor_steps"):
+            if key in prefs:
+                base[key] = prefs[key]
+    return base
+
+
+def _google_save_prefs(patch: dict) -> dict:
+    prefs = _google_prefs()
+    for key in ("hl", "show_window", "keep_citations", "supervisor", "supervisor_steps"):
+        if key in patch:
+            if key == "supervisor_steps":
+                try:
+                    prefs[key] = max(1, min(int(patch[key]), 12))
+                except (TypeError, ValueError):
+                    continue
+            elif key == "supervisor":
+                prefs[key] = bool(patch[key])
+            else:
+                prefs[key] = patch[key]
+    cfg = load_config()
+    cfg["google_prefs"] = prefs
+    save_config(cfg)
+    return prefs
+
+
+def _google_accounts_load() -> dict:
+    path = GOOGLE_ACCOUNTS_FILE()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("accounts"), list):
+            return {"current": data.get("current"), "accounts": data["accounts"]}
+    except (OSError, ValueError):
+        pass
+    return {"current": None, "accounts": []}
+
+
+def _google_accounts_save(store: dict):
+    path = GOOGLE_ACCOUNTS_FILE()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(store, ensure_ascii=False, indent=1), encoding="utf-8")
+        path.chmod(0o600)
+    except OSError:
+        LOG.exception("could not save google accounts")
+
+
+GOOGLE_AUTH_COOKIES = ("SID", "HSID", "SSID", "APISID", "SAPISID",
+                        "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID",
+                        "__Secure-3PAPISID", "OSID")
+
+
+def _google_cookie_pairs(raw: str) -> list:
+    pairs = []
+    for chunk in str(raw or "").split(";"):
+        chunk = chunk.strip()
+        if "=" in chunk:
+            name, value = chunk.split("=", 1)
+            name = name.strip()
+            if name and " " not in name:
+                pairs.append((name, value.strip()))
+    return pairs
+
+
+def _google_has_auth_cookie(raw: str) -> bool:
+    """A real Google session carries at least one httpOnly auth cookie."""
+    names = {name for name, _ in _google_cookie_pairs(raw)}
+    return bool(names & set(GOOGLE_AUTH_COOKIES))
+
+
+def _google_store_account(info: dict, added_by: str, cookie: str = "") -> dict:
+    """Save a Google identity that was actually verified on the page."""
+    email = str((info or {}).get("email") or "").strip()
+    name = str((info or {}).get("name") or "").strip() or email
+    if not email and cookie:
+        # The window proved the session by its cookies but the page did not
+        # name the person; ask Google directly so the card is not "email: ''".
+        try:
+            email = str((google_http.GoogleHTTP(cookie=cookie).account() or {}).get("email") or "")
+            name = name or email
+        except Exception:
+            LOG.info("google account email lookup failed; keeping the session")
+    store = _google_accounts_load()
+    record = next((a for a in store["accounts"]
+                   if email and str(a.get("email") or "").lower() == email.lower()), None)
+    if record is None:
+        record = {"id": "google-" + uuid.uuid4().hex[:10], "created_at": time.time()}
+        store["accounts"].append(record)
+    record.update({"email": email, "name": name, "added_by": added_by,
+                   "verified": True, "verified_at": time.time()})
+    if cookie:
+        record["cookie"] = cookie
+    else:
+        # Never lose a working session to a silent export failure: keep the
+        # cookie this account already had instead of overwriting it with "".
+        LOG.info("google account %s saved without a cookie (had one: %s)",
+                 record.get("id"), bool(record.get("cookie")))
+    # An account with no cookie cannot answer anything, so it must not become
+    # the one in use while another account still has a session.
+    has_any_cookie = bool(record.get("cookie"))
+    if has_any_cookie or not any(a.get("cookie") for a in store["accounts"]):
+        store["current"] = record["id"]
+    _google_accounts_save(store)
+    return record
+
+
+def _google_on_signed_in(info: dict) -> None:
+    """Called by the window watcher the moment Google reports a session.
+
+    The cookie jar is taken out of the window here: everything after sign-in
+    runs over plain HTTPS, and an account saved without its cookies is exactly
+    the broken state where the app "knows" the email but cannot ask anything.
+    """
+    engine = _google_engine()
+    cookie = ""
+    if engine is not None:
+        # Read the jar while the page is still live and keep trying: WebView2
+        # writes the session cookies a moment after the sign-in page settles,
+        # and one early read used to save the account with no session at all
+        # ("cookies: no" in the log), after which every request failed.
+        for attempt in range(4):
+            try:
+                cookie = engine.cookies(tries=1)
+            except Exception:
+                LOG.exception("google window cookie export failed")
+            if cookie:
+                break
+            time.sleep(0.7)
+        if cookie and not _google_has_auth_cookie(cookie):
+            LOG.info("google window jar has no auth cookie yet; waiting once more")
+            time.sleep(1.2)
+            try:
+                again = engine.cookies(tries=1)
+                if again:
+                    cookie = again
+            except Exception:
+                LOG.exception("google window cookie re-export failed")
+    try:
+        record = _google_store_account(info, "window", cookie=cookie)
+        LOG.info("google account verified in the window: %s (cookies: %s)",
+                 info.get("email"), "yes" if cookie else "no")
+        if cookie:
+            LOG.info("google window cookies exported: %d bytes", len(cookie))
+        else:
+            LOG.info("google window exported no cookies: the HTTPS transport "
+                     "will not answer for this session")
+    except Exception:
+        LOG.exception("google account save failed")
+    if engine is not None:
+        try:
+            # A single-use window is *closed*, not hidden: its profile is
+            # deleted, so the next sign-in starts from nothing. A persistent
+            # one is only hidden -- the person may still be looking at it.
+            closer = getattr(engine, "close_sign_in_window", None)
+            if callable(closer):
+                closer()
+            else:
+                engine.hide()  # the window has done its job
+        except Exception:
+            LOG.exception("google window close failed")
+
+
+def _google_watching() -> bool:
+    watch = getattr(_google_engine(), "_watch_stop", None)
+    try:
+        return bool(watch is not None and not watch.is_set())
+    except Exception:
+        return False
+
+
+def _google_accounts_public() -> list:
+    store = _google_accounts_load()
+    out = []
+    for acc in store.get("accounts") or []:
+        if not isinstance(acc, dict):
+            continue
+        out.append({
+            "id": acc.get("id"),
+            "email": acc.get("email") or "",
+            "name": acc.get("name") or "",
+            "provider": "google",
+            "added_by": acc.get("added_by") or "cookies",
+            "has_cookie": bool(acc.get("cookie")),
+            "current": acc.get("id") == store.get("current"),
+            "expired": bool(acc.get("expired")),
+            # Why it is marked: something a person can act on, not "error".
+            "expired_reason": acc.get("expired_reason") or "",
+            "expired_at": acc.get("expired_at") or 0,
+        })
+    return out
+
+
+def _google_account_state() -> dict:
+    """Public accounts plus the verdict on the one in use.
+
+    arena.ai answers the same question with ``status.session_error``; the
+    Google track needs the equivalent so the profile button can say the
+    session died instead of pretending everything is fine.
+    """
+    accounts = _google_accounts_public()
+    current = next((a for a in accounts if a.get("current")), None)
+    return {
+        "accounts": accounts,
+        "session_expired": bool(current and current.get("expired")),
+        "session_reason": (current or {}).get("expired_reason") or "",
+        "current_account": (current or {}).get("email") or "",
+    }
+
+
+def _google_flag_account(acc_id: str, reason: str = "", ok: bool = False) -> None:
+    """Mark the account in use as expired (or clear the mark) on disk."""
+    store = _google_accounts_load()
+    changed = False
+    target = acc_id or str(store.get("current") or "")
+    for acc in store.get("accounts") or []:
+        if not isinstance(acc, dict):
+            continue
+        if target and acc.get("id") != target:
+            continue
+        if ok:
+            if acc.get("expired") or acc.get("expired_reason"):
+                acc.pop("expired", None)
+                acc.pop("expired_reason", None)
+                acc.pop("expired_at", None)
+                changed = True
+        else:
+            acc["expired"] = True
+            acc["expired_reason"] = reason or "Google no longer accepts this session."
+            acc["expired_at"] = time.time()
+            changed = True
+    if changed:
+        _google_accounts_save(store)
+        LOG.info("google account %s marked %s", target or "current",
+                 "ok" if ok else "expired")
+
+
+def _google_live_account() -> dict:
+    """Who Google says is signed in: asked over HTTPS, window as the fallback."""
+    info = _google_http_account()
+    if info.get("signed_in"):
+        info["window"] = _google_window_present()
+        return info
+    engine = _google_engine()
+    if engine is None or not getattr(engine, "window", None):
+        return info or {"signed_in": False, "email": "", "name": "",
+                        "window": False, "source": "http"}
+    live = engine.account() if engine.ready() else {"signed_in": False, "email": "", "name": ""}
+    live["window"] = True
+    live["source"] = "window"
+    return live
+
+
+def _google_window_present() -> bool:
+    """True when a Google window could be opened, not when one is already open.
+
+    This used to ask "is there a window object", which was the same question
+    back when the window was built at startup. Now that it is created on first
+    use, that test answered "no" for a perfectly good build -- and the UI, which
+    greys the sign-in button out on that answer, made Google unreachable.
+    """
+    engine = _google_engine()
+    if engine is None:
+        return False
+    # Any attached window counts, including a lazy one that has not been opened
+    # yet: the question is whether Google is reachable at all, not whether
+    # someone has already pressed the button.
+    return getattr(engine, "window", None) is not None
+
+
+GOOGLE_TURN_BUDGET = 75.0   # seconds; past this the turn is reported, not awaited
+# Error codes that mean "the saved Google session is no longer valid" — the
+# account badge has to change the moment one of them reaches the chat.
+_GOOGLE_SESSION_DEAD = ("signed_out", "no_auth_cookie", "no_cookie", "http_401",
+                        "http_403")
+
+
+class _GoogleDeadline(RuntimeError):
+    """The turn spent its whole budget without an answer."""
+
+
+def _google_ask_with_deadline(client, query: str, budget: float = None):
+    """``client.ask`` with a hard ceiling on wall-clock time.
+
+    ``requests`` timeouts bound a single socket operation, not a whole turn:
+    a session Google keeps half-open, or a retry loop inside the transport,
+    can keep the generator waiting with no event to send. This runs the ask in
+    a worker thread and gives up after ``budget`` seconds, so the chat always
+    receives either an answer or an error.
+    """
+    limit = float(budget if budget is not None else GOOGLE_TURN_BUDGET)
+    box: dict = {}
+
+    def work():
+        try:
+            box["result"] = client.ask(query)
+        except BaseException as exc:  # handed back to the caller below
+            box["error"] = exc
+
+    worker = threading.Thread(target=work, daemon=True, name="google-turn")
+    started = time.time()
+    worker.start()
+    worker.join(limit)
+    if worker.is_alive():
+        LOG.info("google turn exceeded %.0fs; giving up on it", limit)
+        raise _GoogleDeadline()
+    if "error" in box:
+        raise box["error"]
+    if "result" not in box:
+        raise _GoogleDeadline()
+    result = box["result"]
+    if isinstance(result, dict):
+        result.setdefault("elapsed", round(time.time() - started, 1))
+    return result
+
+
+def _google_track_stream(chat_id, message):
+    """One Google AI mode turn: drive the window, save what Google rendered."""
+    existing = _load_chat(chat_id) or {}
+    messages = list(existing.get("messages") or [])
+    first = not any(m.get("role") == "assistant" for m in messages)
+    messages.append({"role": "user", "text": message})
+    title = existing.get("title")
+    if not title or title == "New chat":
+        title = " ".join(str(message).split())[:52] or "Google AI mode chat"
+    _save_chat(chat_id, title=title, messages=messages, mode="direct",
+               modality="text", source="google")
+    LOG.info("google turn: chat %s first=%s (%s chars)", chat_id[:8], first, len(message))
+
+    def generate():
+        _set_track("google")
+        try:
+            yield from _google_events()
+        finally:
+            _set_track("arena")
+
+    def _google_events():
+        yield _sse({"type": "chat", "chat_id": chat_id})
+        prefs = _google_prefs()
+        hl = str(prefs.get("hl") or "en")
+        # ``answer`` is rebound by the window branch (a sibling block, not a
+        # closure), so ``done`` always carries the text that was streamed.
+        answer = ""
+        sources = []
+        http_error = None
+
+        # Plain HTTPS first: the answer lives in /async/folwr, so no window is
+        # needed for a normal turn.
+        client = _google_http_client(hl=hl)
+        if client is None:
+            http_error = google_http.GoogleHTTPError(
+                "no_cookie",
+                "No Google session is saved yet. Add one with 'Use cookies' or by "
+                "signing in to the Google window.")
+        else:
+            yield _sse({"type": "agent", "stage": "Google AI mode is writing…"})
+            effective = _google_compose_query(message, messages[:-1], hl)
+            # A turn must never be able to sit here forever: the browser shows
+            # a spinning card until *something* arrives, so the wait is bounded
+            # and its expiry is reported like any other Google error.
+            try:
+                result = _google_ask_with_deadline(client, effective)
+            except google_http.GoogleHTTPError as exc:
+                LOG.info("google http turn failed: %s", exc.code)
+                http_error = exc
+            except _GoogleDeadline:
+                LOG.info("google http turn: no answer in %ss", GOOGLE_TURN_BUDGET)
+                http_error = google_http.GoogleHTTPError(
+                    "timeout",
+                    f"Google did not finish an answer in {int(GOOGLE_TURN_BUDGET)} s. "
+                    "The request was dropped instead of waiting forever — try again, "
+                    "or use the Google window for this one.")
+            except Exception as exc:
+                LOG.exception("google http turn crashed")
+                http_error = google_http.GoogleHTTPError(
+                    "google_internal", f"{type(exc).__name__}: {exc}")
+            else:
+                answer = result.get("text") or ""
+                sources = result.get("sources") or []
+                LOG.info("google http answer: %s chars in %ss, %s sources",
+                         result.get("chars"), result.get("elapsed"), len(sources))
+
+        # A refused session is the account's problem, not the chat's: mark it
+        # once the answer really failed, so the profile button can say so.
+        if not answer and http_error is not None and http_error.code in _GOOGLE_SESSION_DEAD:
+            _google_flag_account("", reason=http_error.message)
+
+        # Plain HTTPS is the transport. The window is only a shop window for
+        # the two things HTTPS cannot do by itself: a human check, and showing
+        # the page while the person signs in. It is never allowed to grind
+        # silently for minutes on a question — that is what read as "Google
+        # answers forever", with a hidden window chewing on it.
+        window_sent = False
+        if not answer:
+            engine = _google_engine()
+            has_window = engine is not None and getattr(engine, "window", None) is not None
+            code = getattr(http_error, "code", "") if http_error else ""
+            # The flags below tell the chat which button to offer, so they must
+            # not depend on a window that happens to exist already: a person who
+            # signed in with cookies has never opened one, and "wait a minute"
+            # with no way to act is the dead end the log complained about.
+            if code in ("human_check", "throttled") and not has_window:
+                yield _sse({"type": "error", "code": code,
+                            "message": (http_error.message if http_error else ""),
+                            "window": True})
+                has_window = False
+            elif has_window and code in ("human_check", "throttled"):
+                # Only a person can clear this: put the page in front of them
+                # instead of waiting for an answer that will not come.
+                engine.load(engine.search_url(message, hl))
+                engine.show()
+                yield _sse({"type": "error", "code": code,
+                            "message": (http_error.message if http_error else "")
+                                       + " The Google window is open on that page.",
+                            "window": True})
+                has_window = False
+            elif code in _GOOGLE_SESSION_DEAD:
+                # The cookies are gone: say exactly that, offer the window, and
+                # stop. Spinning up a hidden window here used to hide the real
+                # problem behind two to four minutes of nothing. The flag is set
+                # whether or not a window exists yet — the button creates it.
+                yield _sse({"type": "error", "code": code,
+                            "message": (http_error.message if http_error else
+                                        "Google does not accept this session.")
+                                       + " Sign in to Google again: the sign-in button "
+                                         "opens the Google window on a clean session.",
+                            "sign_in": True})
+            else:
+                message_text = http_error.message if http_error else "Google AI mode failed."
+                yield _sse({"type": "error",
+                            "code": http_error.code if http_error else "google",
+                            "message": message_text})
+        # The plan goes to the chat *now*: with the supervisor switch on the
+        # executor can take minutes, and a silent card reads as a hung answer.
+        # Exactly once — the window may already have streamed its own text.
+        if answer and not window_sent:
+            yield _sse({"type": "text", "text": answer, "model": "a"})
+
+        # Supervisor mode: the answer above is the plan, and an Arena Agent chat
+        # carries it out. Google stays the planner; the executor only follows
+        # the brief and asks back when it lacks material.
+        supervisor_id = ""
+        if answer and prefs.get("supervisor"):
+            arena_client = get_client()
+            if not _signed_in_somewhere(arena_client):
+                yield _sse({"type": "notice", "level": "warn",
+                            "text": "Superviser integration is on, but no Arena account is "
+                                    "signed in — the plan was not executed. Sign in to Arena "
+                                    "or turn the switch off."})
+            else:
+                planner = _google_http_client(hl=hl)
+                yield _sse({"type": "agent", "stage": "Supervisor: Arena Agent is executing the plan…"})
+                try:
+                    report, supervisor_id = yield from _supervisor_run(
+                        arena_client, chat_id, title or "", message, answer,
+                        prefs.get("supervisor_steps") or 6, planner,
+                        ru=str(hl).lower().startswith("ru"))
+                except Exception as exc:
+                    LOG.exception("supervisor run failed")
+                    yield _sse({"type": "error", "code": "supervisor_failed",
+                                "message": f"The supervisor run failed: {type(exc).__name__}: {exc}"})
+                    report, supervisor_id = "", ""
+                if report:
+                    answer = (answer + "\n\n---\n\n**Superviser · Arena Agent**\n\n"
+                              + report)
+                    yield _sse({"type": "text", "text": answer, "model": "a"})
+
+        if answer:
+            assistant = {"role": "assistant", "text": answer}
+            if sources:
+                assistant["sources"] = sources
+            if supervisor_id:
+                assistant["supervisor_chat"] = supervisor_id
+            messages.append(assistant)
+            try:
+                _save_chat(chat_id, title=title, messages=messages, mode="direct",
+                           modality="text", source="google")
+            except Exception:
+                LOG.exception("google chat save failed")
+        yield _sse({"type": "done", "text_a": answer, "text_b": "", "dual": False,
+                    "chat_id": chat_id, "google": True, "sources": sources,
+                    "supervisor_chat": supervisor_id})
+
+    return Response(
+        stream_with_context(_sse_wrap(generate(), chat_id=chat_id)),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _google_call_bounded(fn, fallback, limit: float = 2.5):
+    """Run ``fn`` on a worker thread and give up after ``limit`` seconds.
+
+    The status endpoint is polled while a person clicks around, and every one
+    of its inputs can block: a Google request with a 45 s socket timeout, or a
+    WebView call that waits on an event that never fires. Both used to hang the
+    endpoint, and with it the whole UI ("switching to Google mode froze"). A
+    late answer is dropped; the caller gets ``fallback`` and stays responsive.
+    """
+    box: dict = {}
+
+    def work():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # reported, never re-raised into a request
+            box["error"] = exc
+
+    worker = threading.Thread(target=work, daemon=True, name="google-status")
+    worker.start()
+    worker.join(limit)
+    if worker.is_alive():
+        LOG.info("google status: a lookup is still running after %.1fs; answering without it", limit)
+        return fallback
+    if "error" in box:
+        LOG.info("google status: lookup failed: %s", box["error"])
+        return fallback
+    return box.get("value", fallback)
+
+
+def _cache_browser_profiles() -> tuple[str, ...]:
+    """Profiles that must survive this run, because a live window uses them."""
+    keep = ["google-browser"]
+    engine = _google_engine()
+    try:
+        window = getattr(engine, "window", None)
+        inner = getattr(window, "window", None)
+        state = inner.state() if inner is not None and hasattr(inner, "state") else {}
+    except Exception:
+        state = {}
+    if isinstance(state, dict) and state.get("running"):
+        name = state.get("name")
+        if name:
+            keep.append(str(name))
+    return tuple(keep)
+
+
+@app.route("/api/cache")
+def api_cache():
+    """What is cached, where, and how much space it takes."""
+    from arena import appcache
+
+    data = appcache.summary(CONFIG_DIR)
+    return jsonify({"ok": True, "in_use": _cache_browser_profiles(),
+                    "data_dir": str(CONFIG_DIR), **data})
+
+
+@app.route("/api/cache/clear", methods=["POST"])
+def api_cache_clear():
+    """Empty the app's cache. Answers with what was removed, never a bare ok.
+
+    A button that reports success without saying what it did is how the person
+    ended up distrusting the sign-in tick: the screen said "done" and nothing
+    visibly changed. Every removal and every skip is listed here.
+    """
+    from arena import appcache
+
+    keep = _cache_browser_profiles()
+    result = appcache.clear(CONFIG_DIR, keep=keep)
+    # The in-process caches outlive the files, so the next request would keep
+    # answering from memory and the button would look like it did nothing.
+    for cache in (_me_cache, _elo_cache, _update_cache, _GOOGLE_HTTP_ACCOUNT or None):
+        if isinstance(cache, dict):
+            cache.update(t=0.0)
+    LOG.info("cache cleared: %s removed, %s bytes freed, kept %s",
+             len(result.get("removed") or []), result.get("freed") or 0,
+             ", ".join(keep) or "nothing")
+    return jsonify({"ok": True, "in_use": keep, "data_dir": str(CONFIG_DIR), **result})
+
+
+def _window_action(code: str) -> dict | None:
+    """The one button worth offering for this failure, as data.
+
+    The page renders `action.kind`; it never parses the message. When the app
+    cannot read the window at all, pasting cookies is the only road left, and
+    it is the road people find hardest to discover on their own.
+    """
+    if code in ("failed", "unreadable", "none"):
+        return {"kind": "cookies", "label": "Use cookies"}
+    return None
+
+
+def _google_window_diagnosis(engine) -> dict:
+    """Why the sign-in window is what it is, in words a person can act on.
+
+    "Nothing opens" is three different failures wearing one face: no browser
+    was found, a browser opened but its debugging port never answered, or the
+    window is up and the page inside it is asleep. Each needs a different
+    answer, so the screen gets the state instead of guessing.
+    """
+    state = {}
+    try:
+        window = getattr(engine, "window", None)
+        inner = getattr(window, "window", None)
+        state = inner.state() if inner is not None and hasattr(inner, "state") else {}
+    except Exception:
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+
+    if not state:
+        # No window object at all: the CLI build serves this page, and the
+        # window lives in Arena-Desktop.exe.
+        return {
+            "state": "none",
+            "code": "none",
+            "message": ("The Google window is part of Arena-Desktop.exe; "
+                        "this page is served by the CLI build."),
+            "action": _window_action("none"),
+        }
+
+    build_error = str(state.get("build_error") or "")
+    build_code = str(state.get("build_code") or "")
+    if build_error:
+        code = build_code or "failed"
+        return {"state": "failed", "code": code, "message": build_error,
+                "action": _window_action("failed")}
+
+    if not state.get("running"):
+        return {"state": "closed", "code": "closed",
+                "message": "The sign-in window is not running.",
+                "action": _window_action("closed")}
+
+    if state.get("debuggable") is False:
+        return {
+            "state": "unreadable",
+            "code": "unreadable",
+            "message": ("The browser is open but the app cannot read it, so the "
+                        "sign-in cannot be confirmed. Clear the cache and try again."),
+            "action": _window_action("unreadable"),
+        }
+
+    host = str(state.get("host") or getattr(engine, "host", "") or "")
+    if not host:
+        return {"state": "sleeping", "code": "sleeping",
+                "message": "The window is open, the page has not answered yet.",
+                "action": None}
+
+    return {"state": "open", "code": "open",
+            "message": f"The window is on {host}.",
+            "action": None}
+
+
+@app.route("/api/google/status")
+def api_google_status():
+    engine = _google_engine()
+    state = engine.state() if engine is not None else {"attached": False, "ready": False}
+    box = _google_account_state()
+    has_stored_cookie = bool(_google_current_cookie())
+    fallback = {
+        # Не объявляем signed_in=true по одному наличию сохранённых кук:
+        # живое подтверждение должно прийти от сервера, иначе галочка
+        # зажжётся сразу при открытии окна, ещё до входа.
+        "signed_in": False,
+        "email": box["current_account"] if has_stored_cookie else "",
+        "name": box["current_account"] if has_stored_cookie else "",
+        "source": "stored",
+        "window": _google_window_present(),
+        "pending": True,
+    }
+    live = _google_call_bounded(
+        _google_live_account,
+        fallback,
+        limit=2.5,
+    )
+    # Google itself just answered whether it still knows this session: keep the
+    # saved account in step, so the profile button tells the truth without the
+    # person having to click anything.
+    if live.get("signed_in"):
+        # Only a real confirmation clears the mark. A failed live check must
+        # not wipe evidence: the badge would blink back to "fine" by itself.
+        _google_flag_account("", ok=True)
+        box = _google_account_state()
+    signed_in = bool(live.get("signed_in")) and not box["session_expired"]
+    return jsonify({
+        "ok": True,
+        "desktop": engine is not None,
+        "window": state,
+        "diagnosis": _google_window_diagnosis(engine),
+        "signed_in": signed_in,
+        "configured": bool(box["accounts"]),
+        "has_cookie": has_stored_cookie,
+        "account": live,
+        "accounts": box["accounts"],
+        "session_expired": box["session_expired"],
+        "session_reason": box["session_reason"],
+        "prefs": _google_prefs(),
+        "supervisor": bool(_google_prefs().get("supervisor")),
+        "watching": _google_watching(),
+    })
+
+
+@app.route("/api/google/verify", methods=["POST"])
+def api_google_verify():
+    """Check the window against Google itself: who is signed in, if anyone."""
+    _google_forget_account_cache()
+    info = _google_http_account()
+    if not info:
+        engine = _google_engine()
+        if engine is None:
+            return jsonify({"ok": False, "signed_in": False,
+                            "error": "No Google session is saved and this build has no "
+                                     "Google window to check."}), 400
+        info = engine.verify()
+    if info.get("signed_in"):
+        _google_store_account(info, "window" if info.get("source") == "window" else "cookies")
+        _google_flag_account("", ok=True)
+    elif _google_current_cookie():
+        _google_flag_account("", reason="Google does not see a session for the saved cookies.")
+    return jsonify({"ok": True, "signed_in": bool(info.get("signed_in")),
+                    "email": info.get("email") or "", "name": info.get("name") or "",
+                    "error": info.get("error") or "",
+                    "accounts": _google_accounts_public()})
+
+
+@app.route("/api/google/sign-in", methods=["POST"])
+def api_google_sign_in():
+    engine = _google_engine()
+    if engine is None:
+        return jsonify({"ok": False,
+                        "error": "The Google window is part of Arena-Desktop.exe."}), 400
+    data = request.get_json(silent=True) or {}
+    # A sign-in window opens on *no* account: keeping the old jar means Google
+    # signs the person straight back into the session they wanted to replace.
+    engine.open_sign_in(fresh=bool(data.get("fresh", True)))
+    # Sign-in ends by itself: the moment Google reports a session the account
+    # is stored and the window closes, instead of leaving it open for nothing.
+    engine.watch_sign_in(_google_on_signed_in)
+    # Hand the caller the window's own view of itself. Someone who reports
+    # "nothing opens" and someone whose window is up but whose renderer is
+    # asleep produce the same toast otherwise, and the fix is different.
+    probe = engine.cookie_probe() if hasattr(engine, "cookie_probe") else {}
+    return jsonify({"ok": True, "pending": True, "window": probe,
+                    "diagnosis": _google_window_diagnosis(engine)})
+
+
+@app.route("/api/google/open", methods=["POST"])
+def api_google_open():
+    engine = _google_engine()
+    if engine is None:
+        return jsonify({"ok": False, "error": "The Google window is part of Arena-Desktop.exe."}), 400
+    data = request.get_json(silent=True) or {}
+    if data.get("url"):
+        opened = engine.open_url(str(data.get("url")))
+        return jsonify({"ok": bool(opened), "state": engine.state()}), (200 if opened else 400)
+    if data.get("account"):
+        engine.open_account_menu()
+    elif data.get("hide"):
+        engine.hide()
+    else:
+        engine.show()
+    return jsonify({"ok": True, "state": engine.state()})
+
+
+@app.route("/api/google/prefs", methods=["POST"])
+def api_google_prefs():
+    data = request.get_json(silent=True) or {}
+    return jsonify({"ok": True, "prefs": _google_save_prefs(data)})
+
+
+@app.route("/api/google/account")
+def api_google_account():
+    return jsonify({"ok": True, "account": _google_live_account(),
+                    "accounts": _google_accounts_public()})
+
+
+@app.route("/api/google/accounts/cookies", methods=["POST"])
+def api_google_account_cookies():
+    """Add a Google session from a pasted Cookie header — but only if it works.
+
+    Nothing is stored before Google itself confirms the session: pasted text
+    that does not sign the window in is reported back instead of quietly
+    becoming a fake account in the list.
+    """
+    data = request.get_json(silent=True) or {}
+    raw = str(data.get("cookie") or "").strip()
+    if not raw:
+        return jsonify({"ok": False, "error": "Paste the Google cookie line first."}), 400
+    if len(raw) > 65536:
+        return jsonify({"ok": False, "error": "Cookie text is too large."}), 400
+    if not _google_cookie_pairs(raw):
+        return jsonify({"ok": False, "code": "no_pairs",
+                        "error": "That does not look like cookies. Use name=value pairs "
+                                 "separated by semicolons."}), 400
+    if not _google_has_auth_cookie(raw):
+        return jsonify({"ok": False, "code": "no_auth_cookie",
+                        "error": "These cookies contain no Google session (SID, SSID, "
+                                 "__Secure-1PSID, …). A document.cookie dump cannot carry "
+                                 "them: they are httpOnly. Copy the whole Cookie request "
+                                 "header from DevTools → Network, or export cookies with an "
+                                 "extension."}), 400
+    # Ask Google itself whether these cookies carry a session. The window is
+    # only used when the build has one *and* HTTP could not decide.
+    info = {}
+    written = 0
+    http_error = ""
+    try:
+        info = google_http.GoogleHTTP(raw, hl=str(_google_prefs().get("hl") or "ru")).account()
+    except google_http.GoogleHTTPError as exc:
+        http_error = exc.message
+        info = {}
+    except Exception:
+        LOG.exception("google cookie check crashed")
+        info = {}
+    if not info.get("signed_in"):
+        engine = _google_engine()
+        if engine is not None:
+            written = engine.apply_cookies(raw)
+            live = engine.verify()
+            if live.get("signed_in"):
+                info = {"signed_in": True, "email": live.get("email") or "",
+                        "name": live.get("name") or "", "source": "window"}
+    if not info.get("signed_in"):
+        return jsonify({"ok": False, "code": "not_signed_in", "written": written,
+                        "error": "Google still shows no session for these cookies: "
+                                 + (http_error or
+                                    "the line is probably incomplete or expired. Copy the "
+                                    "Cookie request header for a google.com document again "
+                                    "(it must include SID and __Secure-1PSID).")}), 400
+    record = _google_store_account(
+        {"email": info.get("email") or str(data.get("email") or "").strip(),
+         "name": info.get("name") or ""}, "cookies", cookie=raw)
+    _google_forget_account_cache()
+    LOG.info("google account added by cookies and verified: %s (source: %s)",
+             record.get("id"), info.get("source") or "http")
+    return jsonify({"ok": True, "verified": True, "id": record.get("id"), "written": written,
+                    "email": info.get("email") or "",
+                    "accounts": _google_accounts_public(),
+                    "live": _google_live_account()})
+
+
+@app.route("/api/google/accounts/use", methods=["POST"])
+def api_google_account_use():
+    """Switch to a saved Google account: its cookies go into the window."""
+    data = request.get_json(silent=True) or {}
+    acc_id = str(data.get("id") or "")
+    store = _google_accounts_load()
+    record = next((a for a in store["accounts"] if a.get("id") == acc_id), None)
+    if record is None:
+        return jsonify({"ok": False, "error": "That Google account is not saved."}), 404
+    cookie = str(record.get("cookie") or "")
+    info = {}
+    written = 0
+    try:
+        info = google_http.GoogleHTTP(cookie, hl=str(_google_prefs().get("hl") or "ru")).account()
+    except google_http.GoogleHTTPError:
+        info = {}
+    except Exception:
+        LOG.exception("google account switch check crashed")
+        info = {}
+    engine = _google_engine()
+    if not info.get("signed_in") and engine is not None:
+        written = engine.apply_cookies(cookie)
+        live = engine.verify()
+        if live.get("signed_in"):
+            info = live
+    elif engine is not None:
+        engine.apply_cookies(cookie)  # keep the window in step with the choice
+    if not info.get("signed_in"):
+        _google_flag_account(acc_id, reason="Google did not accept the saved cookies "
+                                            "for this account.")
+        if engine is None:
+            return jsonify({"ok": False, "code": "not_signed_in",
+                            "error": "Google did not accept the saved cookies for this "
+                                     "account. Paste a fresh Cookie header.",
+                            "accounts": _google_accounts_public(),
+                            "live": _google_live_account()}), 400
+        return jsonify({"ok": False, "code": "not_signed_in", "written": written,
+                        "error": "Google did not accept the saved cookies for this account. "
+                                 "Sign in again or paste a fresh Cookie header.",
+                        "accounts": _google_accounts_public(),
+                        "live": _google_live_account()}), 400
+    store["current"] = acc_id
+    record["verified"] = True
+    record["verified_at"] = time.time()
+    record.pop("expired", None)
+    record.pop("expired_reason", None)
+    record.pop("expired_at", None)
+    _google_accounts_save(store)
+    _google_forget_account_cache()
+    return jsonify({"ok": True, "written": written, "accounts": _google_accounts_public(),
+                    "live": _google_live_account()})
+
+
+@app.route("/api/google/accounts/remove", methods=["POST"])
+def api_google_account_remove():
+    data = request.get_json(silent=True) or {}
+    acc_id = str(data.get("id") or "")
+    store = _google_accounts_load()
+    before = len(store["accounts"])
+    store["accounts"] = [a for a in store["accounts"] if a.get("id") != acc_id]
+    if store.get("current") == acc_id:
+        store["current"] = store["accounts"][0]["id"] if store["accounts"] else None
+    _google_accounts_save(store)
+    return jsonify({"ok": len(store["accounts"]) < before,
+                    "accounts": _google_accounts_public()})
+
+
+def _google_import_chats(items: list) -> dict:
+    """Store Google's own threads as chats; refresh the ones already known."""
+    added = updated = 0
+    known = {}
+    for item in _list_chats():
+        if item.get("source") != "google":
+            continue
+        data = _load_chat(item["id"]) or {}
+        url = str(data.get("external_url") or "")
+        if url:
+            known[url] = (item["id"], data)
+    now = datetime.now(timezone.utc).isoformat()
+    for raw in items or []:
+        url = str((raw or {}).get("url") or "").strip()
+        title = " ".join(str((raw or {}).get("title") or "").split())[:120]
+        if not url:
+            continue
+        title = title or "Google AI mode thread"
+        if url in known:
+            chat_id, data = known[url]
+            if title != (data.get("title") or ""):
+                data["title"] = title
+                data["updated_at"] = now
+                (CHATS_DIR / chat_id / "chat.json").write_text(
+                    json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+                updated += 1
+            continue
+        chat_id = str(uuid.uuid4())
+        record = {
+            "id": chat_id, "title": title, "account_id": _current_account_id(),
+            "created_at": now, "updated_at": now, "mode": "direct", "modality": "text",
+            "model_a": None, "model_b": None, "eval_id": None, "source": "google",
+            "imported": True, "external_url": url,
+            "external_id": str((raw or {}).get("mtid") or _google_thread_mtid(url)),
+            "messages": [],
+        }
+        chat_dir = CHATS_DIR / chat_id
+        chat_dir.mkdir(parents=True, exist_ok=True)
+        (chat_dir / "chat.json").write_text(
+            json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+        known[url] = (chat_id, record)
+        added += 1
+    return {"added": added, "updated": updated}
+
+
+@app.route("/api/google/threads")
+def api_google_threads():
+    """The Google account's AI mode threads — listed, not imported.
+
+    Mirrors arena.ai's "Only on arena.ai" group: the sidebar shows the cloud
+    list, and a thread becomes a local chat only when the person opens it.
+    Rows already imported carry ``local_chat_id`` so nothing is imported twice.
+    """
+    client = _google_http_client()
+    if client is None:
+        return jsonify({"ok": False, "entries": [], "code": "no_cookie",
+                        "error": "No Google session is saved yet."}), 400
+    # A dead network must not freeze the sidebar: this list is fetched right
+    # after switching to Google mode, and a 45 s socket wait there read as
+    # "the app hung". Google's own thread service answers in a second or two.
+    try:
+        items = _google_call_bounded(lambda: client.threads(limit=40), None, limit=12.0)
+    except google_http.GoogleHTTPError as exc:
+        code = 503 if exc.code == "network" else 400
+        return jsonify({"ok": False, "entries": [], "code": exc.code,
+                        "error": exc.message}), code
+    if items is None:
+        return jsonify({"ok": False, "entries": [], "code": "timeout",
+                        "error": "Google did not return the thread list in time. "
+                                 "The list will refresh on the next attempt."}), 504
+    by_mtid = {}
+    by_url = {}
+    for item in _list_chats():
+        if item.get("source") != "google":
+            continue
+        data = _load_chat(item["id"]) or {}
+        url = str(data.get("external_url") or "")
+        if not url:
+            continue
+        by_url[url] = item["id"]
+        mtid = str(data.get("external_id") or "") or _google_thread_mtid(url)
+        if mtid:
+            by_mtid[mtid] = item["id"]
+    # Google starts a fresh thread (new ``mtid``) every time the same question
+    # is typed again, so the account list is full of twins. One row per
+    # question is enough, and an already imported thread must not show up as a
+    # second cloud row just because its twin was the one imported.
+    entries = []
+    seen_titles = set()
+    for item in items:
+        url = str(item.get("url") or "")
+        if not url:
+            continue
+        mtid = str(item.get("mtid") or "")
+        title = item.get("title") or "Google AI mode thread"
+        key = " ".join(title.split()).strip().casefold()
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+        entries.append({
+            "title": title,
+            "url": url,
+            "mtid": mtid,
+            "local_chat_id": by_mtid.get(mtid) or by_url.get(url) or _google_local_twin(title),
+        })
+    return jsonify({"ok": True, "entries": entries, "count": len(entries)})
+
+
+def _google_local_twin(title: str):
+    """A Google chat already in the list that asks the same question."""
+    key = " ".join(str(title or "").split()).strip().casefold()
+    if not key:
+        return None
+    for item in _list_chats():
+        if item.get("source") != "google":
+            continue
+        if " ".join(str(item.get("title") or "").split()).strip().casefold() == key:
+            return item["id"]
+    return None
+
+
+@app.route("/api/google/threads/open", methods=["POST"])
+def api_google_thread_open():
+    """Turn one Google thread into a local chat (the click on a cloud row)."""
+    data = request.get_json(silent=True) or {}
+    url = str(data.get("url") or "").strip()
+    if not url.startswith("http"):
+        return jsonify({"ok": False, "error": "Missing thread URL"}), 400
+    mtid = str(data.get("mtid") or "") or _google_thread_mtid(url)
+    title = " ".join(str(data.get("title") or "").split())[:120] or "Google AI mode thread"
+
+    # A thread is identified by Google's own ``mtid``: the same thread can come
+    # back with a re-capitalised title and therefore a different URL, and a
+    # second click must still land on the chat that already exists.
+    chat_id = None
+    for item in _list_chats():
+        if item.get("source") != "google":
+            continue
+        if _google_thread_same(_load_chat(item["id"]) or {}, url, mtid):
+            chat_id = item["id"]
+            break
+    imported = False
+    if chat_id is None:
+        counts = _google_import_chats([{"title": title, "url": url, "mtid": mtid}])
+        imported = counts["added"] > 0
+        for item in _list_chats():
+            if item.get("source") != "google":
+                continue
+            if _google_thread_same(_load_chat(item["id"]) or {}, url, mtid):
+                chat_id = item["id"]
+                break
+    if not chat_id:
+        return jsonify({"ok": False, "error": "The thread could not be imported."}), 400
+
+    # An imported row opens with Google's own answer in it, the way an arena.ai
+    # chat opens with the history it had on the site.
+    record = _load_chat(chat_id) or {}
+    if not (record.get("messages") or []):
+        query = _google_thread_query(url) or title
+        if query and mtid:
+            try:
+                result = google_http.thread_answer(
+                    _google_current_cookie(), mtid, query,
+                    hl=str(_google_prefs().get("hl") or "ru"))
+            except Exception as exc:
+                LOG.info("google thread read failed: %s", exc)
+            else:
+                text = result.get("text") or ""
+                if text:
+                    record["messages"] = [{"role": "user", "text": query},
+                                          {"role": "assistant", "text": text}]
+                    if result.get("sources"):
+                        record["sources"] = result["sources"]
+                    record["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    (CHATS_DIR / chat_id / "chat.json").write_text(
+                        json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+    return jsonify({"ok": True, "chat_id": chat_id, "imported": imported,
+                    "messages": len(record.get("messages") or [])})
+
+
+def _google_thread_same(record: dict, url: str, mtid: str) -> bool:
+    """Does this saved chat stand for the Google thread in question?"""
+    saved = str(record.get("external_url") or "")
+    if not saved:
+        return False
+    if mtid:
+        return _google_thread_mtid(saved) == mtid
+    return saved == url
+
+
+def _google_thread_query(url: str) -> str:
+    """The question a saved thread's URL carries in its ``q`` parameter."""
+    try:
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    except Exception:
+        return ""
+    return " ".join((params.get("q") or [""])[0].split())[:300]
+
+
+def _google_thread_mtid(url: str) -> str:
+    try:
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    except Exception:
+        return ""
+    return str((params.get("mtid") or [""])[0])
+
+
+@app.route("/api/google/thread/read", methods=["POST"])
+def api_google_thread_read():
+    """Read one saved thread's answer back out of Google, for the imported view."""
+    data = request.get_json(silent=True) or {}
+    url = str(data.get("url") or "")
+    mtid = str(data.get("mtid") or "")
+    query = " ".join(str(data.get("q") or "").split())
+    if not url or not mtid:
+        return jsonify({"ok": False, "error": "Needs a thread URL and mtid"}), 400
+    raw = _google_current_cookie()
+    if not raw:
+        return jsonify({"ok": False, "code": "no_cookie",
+                        "error": "No Google session is saved yet."}), 400
+    try:
+        result = google_http.thread_answer(raw, mtid, query or str(data.get("title") or ""),
+                                           hl=str(_google_prefs().get("hl") or "ru"))
+    except google_http.GoogleHTTPError as exc:
+        return jsonify({"ok": False, "code": exc.code, "error": exc.message}), 400
+    return jsonify({"ok": True, "text": result.get("text") or "",
+                    "sources": result.get("sources") or []})
+
+
+@app.route("/api/google/import", methods=["POST"])
+def api_google_import():
+    """Pull the person's Google AI mode threads into the chat list."""
+    client = _google_http_client()
+    items = []
+    reason = ""
+    if client is not None:
+        try:
+            items = client.threads(limit=40)
+        except google_http.GoogleHTTPError as exc:
+            reason = exc.message
+            items = []
+    if not items:
+        engine = _google_engine()
+        if engine is None:
+            return jsonify({"ok": False,
+                            "error": reason or "No Google session is saved yet."}), 400
+        result = engine.history()
+        items = list(result.get("items") or [])
+        reason = result.get("reason") or reason
+    counts = _google_import_chats(items)
+    return jsonify({"ok": True, "found": len(items), "added": counts["added"],
+                    "updated": counts["updated"],
+                    "reason": reason or "",
+                    "chats": _list_chats()})
+
+
 def _api_chat_impl():
     global _current_chat_id, _conversation_history, _ui_mode, _ui_modality
     data = request.get_json(silent=True) or {}
+    # Work out the track once per request; helpers below read it.
+    _set_track("google" if data.get("track") == "google" else "arena")
     message = (data.get("message") or "").strip()
     if not message:
         return jsonify({"error": "Empty message"}), 400
     client = get_client()
+    if data.get("track") == "google":
+        google_id = data.get("chat_id") or str(uuid.uuid4())
+        if not _validate_chat_id(google_id):
+            return jsonify({"error": "Invalid chat ID", "code": "bad_request"}), 400
+        # A Google turn must never rewrite an Arena chat: the two tracks keep
+        # separate lists, and re-labelling would hide the other chat.
+        probe = _load_chat(google_id) or {}
+        if probe and probe.get("source") != "google":
+            return jsonify({"error": "This chat belongs to Arena. Start a new Google AI mode chat.",
+                            "code": "wrong_track"}), 400
+        if _chat_generating(google_id):
+            return jsonify({"error": "This chat is still working on the previous message.",
+                            "code": "busy"}), 409
+        return _google_track_stream(google_id, message)
     if not _signed_in_somewhere(client):
         return jsonify({"error": "Not signed in. Press Sign in first.", "code": "auth"}), 401
     chat_id = data.get("chat_id") or str(uuid.uuid4())
@@ -8053,7 +10353,12 @@ def _api_chat_impl():
             conv["prefix"] += _digest_block(digest)
             conv["digest_used"] = True
     ui_mode, ui_modality = _ui_mode, _ui_modality
-    names = {"a": "Agent", "b": None} if _ui_mode == "agent" else {"a": _model_name(model_a), "b": _model_name(model_b)}
+    if _ui_mode == "agent":
+        names = {"a": "Agent", "b": None}
+    elif _ui_mode == "battle":
+        names = {"a": _model_name(model_a) or "Arena model", "b": _model_name(model_b) or "Arena model"}
+    else:
+        names = {"a": _model_name(model_a), "b": _model_name(model_b)}
     dual = mode in ("battle", "side-by-side")
     # Tools: Agent always; other text modes when a folder is chosen and the
     # composer toggle is on (clients that omit "tools" keep the old rule).
@@ -8291,6 +10596,7 @@ def api_terminal():
             (["cmd.exe", "/d", "/s", "/c", cmd] if sys.platform == "win32" else ["/bin/sh", "-lc", cmd]),
             shell=False, capture_output=True, text=True,
             timeout=30, cwd=str(Path.home()),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return jsonify({
             "output": result.stdout[-4000:] if result.stdout else "",
@@ -8305,11 +10611,75 @@ def api_terminal():
 
 # ---------- Guard, permissions, engine, diagnostics, workspace ----------
 
+@app.route("/api/diag/dump", methods=["POST", "GET"])
+def api_diag_dump():
+    reason = str(request.values.get("reason") or "manual dump")
+    LOG.warning("[diag] dump on demand: %s", reason)
+    return jsonify({"ok": True, "reason": reason})
+
+
+@app.route("/api/diag", methods=["POST"])
+def api_diag():
+    data = request.get_json(silent=True) or {}
+    message = str(data.get("message") or "")[:400]
+    kind = str(data.get("kind") or "info")
+    if kind in ("error", "slow"):
+        LOG.warning("[ui] %s", message)
+    return jsonify({"ok": True})
+
+
+@app.before_request
+def _diag_request_start():
+    """Diagnostics: every HTTP request, its thread and its arrival time.
+
+    A freeze that happens while a request is in flight is invisible in a normal
+    log. This records the start of every call with the thread that runs it, so
+    the last line before silence names the exact request that never returned.
+    """
+    try:
+        from arena import diag
+        if diag.enabled():
+            diag.note(f"HTTP {request.method} {request.path} "
+                      f"(поток {threading.current_thread().name})")
+            _diag_mark(request.path)
+    except Exception:
+        pass
+    return None
+
+
+@app.after_request
+def _diag_request_end(response):
+    """Diagnostics: how long the request took, so slow ones stand out."""
+    try:
+        from arena import diag
+        if diag.enabled():
+            started = getattr(_diag_tl, "started", None)
+            if started is not None:
+                cost = time.time() - started
+                level = diag.LOG.warning if cost >= 1.0 else diag.LOG.info
+                level("[diag] HTTP %s %s -> %s за %.2f с",
+                      request.method, request.path, response.status_code, cost)
+    except Exception:
+        pass
+    return response
+
+
+_diag_tl = threading.local()
+
+
+def _diag_mark(path: str) -> None:
+    _diag_tl.started = time.time()
+    _diag_tl.path = path
+
+
 @app.before_request
 def _local_same_origin_only():
     """Only this app's own page may drive the API: blocks other sites, DNS rebinding and generated previews."""
     if request.host.rsplit(":", 1)[0] not in ("127.0.0.1", "localhost"):
         return jsonify({"error": "Unknown host"}), 403
+    # Boot screen polls readiness before any token exists: never 403 it.
+    if request.method == "GET" and request.path == "/api/readiness":
+        return None
     if request.path.startswith("/api/"):
         token = request.headers.get("X-Arena-Token") or ""
         instance = request.headers.get("X-Arena-Instance-Token") or ""
@@ -8330,15 +10700,14 @@ def _local_same_origin_only():
 
 @app.route("/api/permission-mode", methods=["GET", "POST"])
 def api_permission_mode():
-    cfg = load_config()
     if request.method == "POST":
         mode = (request.get_json(silent=True) or {}).get("mode")
         if mode not in permissions.MODES:
             return jsonify({"ok": False, "error": f"Unknown permission mode: {mode}"}), 400
-        cfg["permission_mode"] = mode
-        save_config(cfg)
-    mode = permissions.normalize(cfg.get("permission_mode"))
-    return jsonify({"ok": True, "mode": mode, "label": permissions.MODES[mode], "modes": permissions.MODES})
+        _settings_store({"permission_mode": mode})
+    mode = permissions.normalize(_settings_value("permission_mode"))
+    return jsonify({"ok": True, "mode": mode, "label": permissions.MODES[mode],
+                    "modes": permissions.MODES, "track": _request_track()})
 
 
 @app.route("/api/permissions")
@@ -8462,7 +10831,8 @@ def _allowed_root(raw) -> Optional[Path]:
 def api_workspace():
     root = _workspace_dir()
     return jsonify({"workspace": str(root), "exists": root.is_dir(), "projects_dir": str(workspace.PROJECTS_DIR),
-                    "panel_root": str(_panel_workspace_root()), "projects": workspace.list_projects()})
+                    "panel_root": str(_panel_workspace_root()), "projects": workspace.list_projects(),
+                    "track": _request_track()})
 
 
 def _workspace_panel_path(rel: str = "."):
@@ -8586,11 +10956,21 @@ def api_workspace_preview(subpath):
 @app.route("/api/workspace/set", methods=["POST"])
 def api_workspace_set():
     payload = request.get_json(silent=True) or {}
+    track = "google" if str(payload.get("track") or "").lower() == "google" else "arena"
+    _set_track(track)
     if payload.get("clear"):
-        cfg = load_config()
-        cfg.pop("workspace_dir", None)
-        save_config(cfg)
-        return jsonify({"ok": True, "workspace": str(_workspace_dir()), "cleared": True})
+        if track == "google":
+            cfg = load_config()
+            scoped = dict(cfg.get("google_settings") or {})
+            scoped.pop("workspace_dir", None)
+            cfg["google_settings"] = scoped
+            save_config(cfg)
+        else:
+            cfg = load_config()
+            cfg.pop("workspace_dir", None)
+            save_config(cfg)
+        return jsonify({"ok": True, "workspace": str(_workspace_dir()), "cleared": True,
+                        "track": track})
     raw = ((payload.get("path") or "")).strip().strip('"')
     if not raw:
         return jsonify({"ok": False, "error": "No folder given"}), 400
@@ -8604,10 +10984,8 @@ def api_workspace_set():
         root.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return jsonify({"ok": False, "error": f"Cannot use that folder: {e}"}), 400
-    cfg = load_config()
-    cfg["workspace_dir"] = str(root)
-    save_config(cfg)
-    return jsonify({"ok": True, "workspace": str(root)})
+    _settings_store({"workspace_dir": str(root)})
+    return jsonify({"ok": True, "workspace": str(root), "track": track})
 
 
 @app.route("/api/workspace/save", methods=["POST"])
@@ -8670,7 +11048,8 @@ def _git_run(root: Path, args, check=True, timeout=30):
         result = subprocess.run(
             [executable, "-C", str(root), *args],
             cwd=str(root), capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout, env=env)
+            encoding="utf-8", errors="replace", timeout=timeout, env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except subprocess.TimeoutExpired:
         raise _GitError(f"Git {' '.join(args[:2])} timed out.", 408)
     except OSError as exc:

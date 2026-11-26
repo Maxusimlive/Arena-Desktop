@@ -1545,6 +1545,7 @@ class _FakeNativeChatEngine:
         self.window = object()
         self.challenge = None
         self.calls = []
+        self.headers_log = []
         self.preflights = []
 
     def ready(self):
@@ -1564,6 +1565,7 @@ class _FakeNativeChatEngine:
         import json as _json
         self.calls.append((path, body, v3_action))
         self.last_headers = headers
+        self.headers_log.append((path, dict(headers or {})))
         if path == "/nextjs-api/stream/create-chat":
             return _FakeEngineResp(200, _json.dumps({
                 "id": _NATIVE_SESSION_ID,
@@ -1650,7 +1652,9 @@ def _native_create_and_stream(web, monkeypatch):
     assert create[1]["message"]["id"][14] == "7"  # UUIDv7, like the website
     assert create[1]["cx"] == "fake-genuine-cx"
     assert create[1]["enabledConnectors"] == ["github"]
-    assert engine.last_headers and engine.last_headers.get("X-Agent-Browser-Attempt-Id")
+    create_headers = next(h for (p, h) in engine.headers_log
+                          if p == "/nextjs-api/stream/create-chat")
+    assert create_headers.get("X-Agent-Browser-Attempt-Id")
     assert engine.preflights and engine.preflights[0] == "agentic_chat_submit"
     assert appends == []  # first message rides inside create-chat
 
@@ -1681,10 +1685,10 @@ def test_native_agent_followup_appends_without_recreate(web, monkeypatch):
         "agent_backend": "arena", "timezone": "Europe/Moscow"}))
     assert ev[-1]["text_a"] == "Продолжаю"
     assert len([1 for call in engine.calls if call[0].endswith("create-chat")]) == creates_before
-    assert any(call[0] == "/api/chat/trigger-session" for call in engine.calls)
+    assert any(call[0].endswith("/session") for call in engine.calls)
     assert len(appends) == 1
     url, payload = appends[0]
-    assert url.endswith(f"/ai-proxy/realtime/v1/sessions/{_NATIVE_TRIGGER}/in/append")
+    assert url.endswith(f"/api/chat/{_NATIVE_TRIGGER}/input")
     assert payload["kind"] == "message"
     assert payload["payload"]["chatId"] == _NATIVE_TRIGGER
     assert payload["payload"]["message"]["parts"][0]["text"] == "Дальше"

@@ -3693,14 +3693,14 @@ You can start with a more structured option: one script, short captions, and a c
     }
     const appNameNode = document.getElementById('topbarAppName');
     if (appNameNode) appNameNode.textContent = next === 'google' ? 'Google AI mode' : 'Arena Desktop';
-    // The same button means two different things: in Arena it integrates the
-    // agent into the chat, in Google AI mode it lets Google direct an Arena
-    // Agent as the executor.
+    document.body.dataset.track = next;
+    document.body.dataset.mode = state.mode || 'battle';
     const integrationChip = els.agentIntegrationButton;
     if (integrationChip) {
+      integrationChip.hidden = next === 'google';
       const label = integrationChip.querySelector('.chip-label');
-      if (label) label.textContent = next === 'google' ? 'Agent integration' : 'Agent integration';
-      integrationChip.setAttribute('aria-label', next === 'google' ? 'Agent integration' : 'Agent integration');
+      if (label) label.textContent = 'Agent integration';
+      integrationChip.setAttribute('aria-label', 'Agent integration');
     }
     const copy = TRACK_COPY[next];
     const titleNode = document.getElementById('welcomeTitle');
@@ -6563,6 +6563,8 @@ You can start with a more structured option: one script, short captions, and a c
 
   function updateComposerState() {
     if (!els.prompt) return;
+    document.body.dataset.mode = state.mode || 'battle';
+    document.body.dataset.track = state.track || 'arena';
     const meta = modeMeta(state.mode);
     const mod = modalityMeta(state.modality);
     if (els.modeLabel) els.modeLabel.textContent = meta.label;

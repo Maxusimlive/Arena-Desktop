@@ -32,6 +32,7 @@ a = Analysis(
         'arena.desktop',
         'arena.google_ai',
         'arena.google_http',
+        'arena.orchestrator_mcp',
         'arena.deep_links',
         'arena.web',
         'arena.web.app',

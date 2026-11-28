@@ -313,8 +313,34 @@ class ConnectorManager:
     def config_path(self) -> Path:
         return self._config_path
 
+    class _BuiltinOrchestratorClient:
+        """In-process MCP client adapter for the built-in Orchestrator server."""
+        def call_tool(self, tool_name: str, arguments: Dict[str, Any], timeout: float = 90) -> str:
+            from arena import orchestrator_mcp
+            return orchestrator_mcp.call_tool(tool_name, arguments)
+
+
     def _servers(self) -> Dict[str, Dict[str, Any]]:
-        return configured_servers(self._config_path)
+        servers = configured_servers(self._config_path)
+        if "orchestrator" not in servers:
+            servers = {
+                "orchestrator": {
+                    "name": "orchestrator",
+                    "transport": "builtin",
+                    "enabled": True,
+                    "command": "Built-in · Google AI Mode (Senior) → Local Model (Junior)",
+                    "args": [],
+                    "env": {},
+                    "cwd": None,
+                    "preset_id": "orchestrator",
+                    "raw": {"builtin": True, "enabled": True},
+                },
+                **servers,
+            }
+        else:
+            servers["orchestrator"]["transport"] = "builtin"
+            servers["orchestrator"]["command"] = "Built-in · Google AI Mode (Senior) → Local Model (Junior)"
+        return servers
 
     @staticmethod
     def _signature(server: Dict[str, Any]) -> str:
@@ -361,6 +387,22 @@ class ConnectorManager:
             client = None
         if not server["enabled"]:
             status = "disabled"
+        elif server["transport"] == "builtin":
+            from arena import orchestrator_mcp
+            return {
+                "name": name,
+                "enabled": True,
+                "status": "connected",
+                "transport": "builtin",
+                "command": server.get("command") or "Built-in Orchestrator",
+                "preset_id": "orchestrator",
+                "error": None,
+                "tools": [
+                    {"name": t["name"], "description": t.get("description") or ""}
+                    for t in orchestrator_mcp.TOOLS
+                ],
+                "tool_count": len(orchestrator_mcp.TOOLS),
+            }
         elif server["transport"] != "stdio":
             status = "unsupported"
         elif running:
@@ -508,6 +550,20 @@ class ConnectorManager:
                 pass
             self._drop_stale(servers)
             out: Dict[str, Dict[str, Any]] = {}
+            orch = servers.get("orchestrator")
+            if orch and orch.get("enabled"):
+                from arena import orchestrator_mcp
+                bclient = self._BuiltinOrchestratorClient()
+                for tool in orchestrator_mcp.TOOLS:
+                    original = str(tool.get("name") or "")
+                    alias = f"mcp__orchestrator__{_sanitize_alias_part(original)}"
+                    out[alias] = {
+                        "alias": alias, "server": "orchestrator", "tool": original,
+                        "description": tool.get("description") or "",
+                        "input_schema": tool.get("inputSchema") or {},
+                        "annotations": {},
+                        "client": bclient,
+                    }
             for server_name, client in list(self._clients.items()):
                 if not client.process or client.process.poll() is not None:
                     self._errors[server_name] = client.last_error or "MCP server exited"

@@ -2690,6 +2690,83 @@ textarea.input { height: auto; min-height: 74px; resize: vertical; line-height: 
 .assistant-lane.is-streaming { border: 0 !important; border-color: transparent !important; box-shadow: none !important; }
 .assistant-lane.is-streaming .lane-head { border-bottom-color: transparent !important; }
 .agent-steps { display: none !important; }
+
+/* Redesigned mode-aware '+' options popover: tight, logical spacing + dynamic mode colors */
+.popover {
+  --pop-bg: #1c1d1f;
+  --pop-border: #323438;
+  --pop-accent: #d8dee9;
+  --pop-hover: rgba(255, 255, 255, 0.06);
+  background: var(--pop-bg) !important;
+  border: 1px solid var(--pop-border) !important;
+  border-radius: 14px !important;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.55) !important;
+  padding: 10px 12px !important;
+}
+body[data-track="google"] .popover {
+  --pop-bg: #131924;
+  --pop-border: #2a3f63;
+  --pop-accent: #6ea8ff;
+  --pop-hover: rgba(110, 168, 255, 0.10);
+}
+body[data-mode="agent"] .popover {
+  --pop-bg: #141c18;
+  --pop-border: #2a4737;
+  --pop-accent: #4ade80;
+  --pop-hover: rgba(74, 222, 128, 0.10);
+}
+body[data-mode="direct"] .popover {
+  --pop-bg: #191822;
+  --pop-border: #3b3556;
+  --pop-accent: #a78bfa;
+  --pop-hover: rgba(167, 139, 250, 0.10);
+}
+.popover .popover-head {
+  padding: 2px 2px 8px !important;
+  margin-bottom: 6px !important;
+  border-bottom: 1px solid var(--pop-border) !important;
+}
+.popover .popover-section {
+  margin: 0 !important;
+  padding: 6px 0 !important;
+  gap: 4px !important;
+}
+.popover .popover-section + .popover-section {
+  margin-top: 4px !important;
+  padding-top: 8px !important;
+  border-top: 1px solid var(--pop-border) !important;
+}
+.popover .popover-section-title,
+.popover .popover-label {
+  margin: 0 0 6px !important;
+  padding: 0 4px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.04em !important;
+  text-transform: uppercase !important;
+  color: var(--pop-accent) !important;
+  opacity: 0.85;
+}
+.popover .popover-connector-list {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 2px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+.popover .popover-row,
+.popover .connector-row,
+.popover .popover-action {
+  padding: 6px 8px !important;
+  margin: 0 !important;
+  border-radius: 8px !important;
+  transition: background 120ms ease !important;
+}
+.popover .popover-row:hover,
+.popover .connector-row:hover,
+.popover .popover-action:hover {
+  background: var(--pop-hover) !important;
+}
 .status-bar { border-top-color: transparent; color: #83817c; }
 .button { border-radius: 999px; }
 .popover, .modal-card { background: #2d2d2b; border-color: #454441; }

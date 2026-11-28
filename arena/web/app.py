@@ -9263,33 +9263,52 @@ def _google_track_stream(chat_id, message):
                 yield _sse({"type": "agent", "stage": "Google AI mode (WebView)…"})
                 w_text = ""
                 try:
-                    engine.load(engine.search_url(effective, hl))
+                    target_url = engine.search_url(effective, hl)
+                    LOG.info("[google-fallback] start: url_len=%d window=%s ready=%s",
+                             len(target_url), bool(engine.window),
+                             getattr(engine, "_ready", None))
+                    engine.load(target_url)
                     # Give WebView2 a moment to finish initial navigation before
                     # evaluating JS (avoids the 6s eval timeout during load).
                     time.sleep(3.5)
-                    deadline = time.time() + 35.0
+                    t0 = time.time()
+                    deadline = t0 + 35.0
                     last_seen = ""
                     stable_since = 0.0
+                    poll_i = 0
                     while time.time() < deadline:
+                        poll_i += 1
                         time.sleep(1.0)
                         cur = ""
+                        raw = None
                         try:
                             raw = engine._answer_text()
                             if raw:
                                 cur = engine.clean_answer(raw, effective)
-                        except Exception:
+                        except Exception as poll_exc:
+                            LOG.info("[google-fallback] poll #%d (%.1fs) eval error: %s",
+                                     poll_i, time.time() - t0, poll_exc)
                             cur = ""
+                        if poll_i <= 5 or poll_i % 5 == 0 or (cur and cur != last_seen):
+                            LOG.info("[google-fallback] poll #%d (%.1fs) raw_type=%s raw_len=%d cur_len=%d preview=%r",
+                                     poll_i, time.time() - t0, type(raw).__name__,
+                                     len(raw) if isinstance(raw, str) else -1,
+                                     len(cur), cur[:80])
                         if cur and cur != last_seen:
                             last_seen = cur
                             stable_since = time.time()
                             yield _sse({"type": "text", "text": cur, "model": "a"})
                         elif cur and stable_since and (time.time() - stable_since) >= 2.0:
                             w_text = cur
+                            LOG.info("[google-fallback] stabilized at poll #%d (%.1fs) len=%d",
+                                     poll_i, time.time() - t0, len(w_text))
                             break
                     if not w_text and last_seen:
                         w_text = last_seen
+                    LOG.info("[google-fallback] loop end: polls=%d elapsed=%.1fs w_text_len=%d",
+                             poll_i, time.time() - t0, len(w_text))
                 except Exception as exc:
-                    LOG.info("google webview fallback failed: %s", exc)
+                    LOG.exception("[google-fallback] crashed: %s", exc)
                 if w_text.strip():
                     answer = w_text.strip()
                     window_sent = True

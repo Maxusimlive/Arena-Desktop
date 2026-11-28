@@ -9258,8 +9258,7 @@ def _google_track_stream(chat_id, message):
                 has_window = False
             elif has_window and code == "throttled":
                 # Plain HTTP hit Google's JS interstitial, which a real WebView
-                # solves automatically! Ask directly through the Google WebView
-                # generator and stream the rendered AI Mode answer seamlessly.
+                # solves automatically! Stream directly through the Google WebView.
                 yield _sse({"type": "agent", "stage": "Google AI mode (WebView)…"})
                 w_text = ""
                 try:
@@ -9272,6 +9271,8 @@ def _google_track_stream(chat_id, message):
                             yield _sse({"type": "text", "text": w_text, "model": "a"})
                         elif etype == "done" and ev.get("text_a"):
                             w_text = str(ev.get("text_a"))
+                        elif etype == "error":
+                            LOG.info("google webview fallback event error: %s", ev.get("message"))
                 except Exception as exc:
                     LOG.info("google webview fallback failed: %s", exc)
                 if w_text.strip():

@@ -4703,52 +4703,189 @@ You can start with a more structured option: one script, short captions, and a c
     return found;
   }
 
+  function formatDurationBadge(activity) {
+    const ms = Number(activity?.duration_ms ?? activity?.raw?.duration_ms ?? activity?.raw?.elapsed_ms ?? 0);
+    if (!Number.isFinite(ms) || ms <= 0) return '';
+    return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+  }
+
+  function parseActivityIO(activity) {
+    const rawDetail = String(activity.command || activity.path || activity.detail || '').trim();
+    const rawOutput = String(activity.output ?? activity.result ?? activity.raw?.output ?? activity.raw?.stdout ?? activity.raw?.result ?? '').trim();
+    let inputLabel = 'INPUT';
+    let inputText = rawDetail;
+    let outputText = rawOutput;
+    let promptText = '';
+    if (rawDetail.startsWith('{') && rawDetail.endsWith('}')) {
+      try {
+        const obj = JSON.parse(rawDetail);
+        if (typeof obj.command === 'string') {
+          inputLabel = 'COMMAND';
+          inputText = `$ ${obj.command}`;
+        } else if (typeof obj.prompt === 'string') {
+          promptText = obj.prompt;
+          inputText = obj.prompt;
+        } else {
+          inputText = JSON.stringify(obj, null, 2);
+        }
+        if (!outputText && (obj.stdout || obj.output || obj.result)) {
+          outputText = String(obj.stdout || obj.output || obj.result);
+        }
+      } catch {}
+    } else if (String(activity.name || '').toLowerCase().includes('bash') || String(activity.name || '').toLowerCase() === 'run') {
+      inputLabel = 'COMMAND';
+      if (inputText && !inputText.startsWith('$ ')) inputText = `$ ${inputText}`;
+    }
+    return { inputLabel, inputText, outputText, promptText };
+  }
+
+  function arenaCopyBox(label, text) {
+    const copyBtn = el('button', { class: 'arena-io-copy', type: 'button', title: 'Copy' }, iconEl('copy'));
+    copyBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      navigator.clipboard?.writeText(text).catch(() => {});
+    });
+    return el('div', { class: 'arena-io-box' },
+      el('div', { class: 'arena-io-head' }, el('span', { text: label }), copyBtn),
+      el('pre', { class: 'arena-io-pre', text })
+    );
+  }
+
+  function openArenaPreview({ title = 'Preview', url = '', isImage = false, text = '' }) {
+    let panel = document.getElementById('arenaPreviewPanel');
+    if (!panel) {
+      panel = el('aside', { id: 'arenaPreviewPanel', class: 'arena-preview-panel' });
+      document.body.appendChild(panel);
+    }
+    clear(panel);
+    const expandBtn = el('button', { class: 'arena-preview-btn', type: 'button', title: 'Toggle wide' }, iconEl('maximize'));
+    expandBtn.addEventListener('click', () => panel.classList.toggle('is-wide'));
+    const dlBtn = url
+      ? el('a', { class: 'arena-preview-btn', href: url, download: title, title: 'Download' }, iconEl('download'))
+      : el('span');
+    const closeBtn = el('button', { class: 'arena-preview-btn', type: 'button', title: 'Close' }, iconEl('x'));
+    closeBtn.addEventListener('click', () => panel.remove());
+    const topBar = el('div', { class: 'arena-preview-bar' },
+      expandBtn,
+      el('div', { class: 'arena-preview-title' }, iconEl('file'), el('span', { text: title })),
+      dlBtn,
+      closeBtn
+    );
+    const stage = el('div', { class: 'arena-preview-stage' });
+    if (isImage && url) {
+      stage.appendChild(el('img', { src: url, alt: title, class: 'arena-preview-img' }));
+    } else if (url) {
+      stage.appendChild(el('iframe', { src: url, class: 'arena-preview-frame', title }));
+    } else {
+      stage.appendChild(el('pre', { class: 'arena-preview-code', text }));
+    }
+    panel.appendChild(topBar);
+    panel.appendChild(stage);
+  }
+
+  function renderSingleActivityCard(activity, activityIndex, baseKey) {
+    const status = activityStatus(activity.status);
+    const nameRaw = String(activity.name || 'Action');
+    const nameLow = nameRaw.toLowerCase();
+    const { inputLabel, inputText, outputText, promptText } = parseActivityIO(activity);
+
+    // Arena-style image generation loading state
+    if ((nameLow.includes('generate_image') || nameLow === 'image') && status.cls === 'is-run') {
+      return el('div', { class: 'arena-img-gen' },
+        el('div', { class: 'arena-img-gen-head' },
+          iconEl('image'),
+          el('span', { text: 'Generating image options…' }),
+          el('span', { class: 'mini-spinner' })
+        ),
+        promptText ? el('div', { class: 'arena-img-gen-prompt', text: promptText }) : null
+      );
+    }
+
+    const childId = activity.raw?.child_id;
+    const subModel = activity.raw?.model_name || (activity.raw?.model && !['a', 'b'].includes(activity.raw.model) ? activity.raw.model : '');
+    const mcpUsed = mcpToolsUsed(activity);
+    const isBash = nameLow === 'bash' || nameLow === 'run' || nameLow === 'run_cmd' || nameLow === 'shell';
+
+    // Extract clean tool name (strip mcp__server__ prefix so the actual tool name is shown)
+    let displayTitle = childId ? `Sub-agent${subModel ? ' \u00b7 ' + subModel : ''}` : nameRaw;
+    if (isBash) {
+      displayTitle = 'Used Bash';
+    } else if (mcpUsed.length) {
+      const firstTool = mcpUsed[0].includes('.') ? mcpUsed[0].split('.').pop() : mcpUsed[0];
+      displayTitle = firstTool || displayTitle;
+    } else if (displayTitle.startsWith('mcp__')) {
+      const parts = displayTitle.split('__');
+      displayTitle = parts[parts.length - 1] || displayTitle;
+    }
+
+    const dur = formatDurationBadge(activity);
+    const iconName = childId ? 'layers' : isBash ? 'terminal' : (mcpUsed.length || !isBash) ? 'wrench' : 'terminal';
+    const activityKey = `${baseKey}:activity:${activity.id || activityIndex}:${nameRaw}`;
+
+    const summary = el('summary', { class: 'arena-tool-summary' },
+      el('span', { class: 'arena-tool-icon' }, iconEl(iconName)),
+      el('span', { class: 'arena-tool-name', text: displayTitle }),
+      status.cls === 'is-ok'
+        ? el('span', { class: 'arena-tool-check', text: '✓' })
+        : el('span', { class: `activity-status ${status.cls}`, text: status.label }),
+      dur ? el('span', { class: 'arena-tool-dur', text: dur }) : null
+    );
+
+    const body = el('div', { class: 'arena-tool-body' });
+    if (inputText) body.appendChild(arenaCopyBox(inputLabel, inputText));
+    if (outputText) body.appendChild(arenaCopyBox(isBash ? 'STDOUT' : 'OUTPUT', outputText));
+    if (activity.url) {
+      const isImg = /\.(png|jpe?g|webp|gif)(\?|$)/i.test(activity.url);
+      const prevBtn = el('button', { class: 'preview-link', type: 'button' }, iconEl('external'), el('span', { text: 'Open in Preview' }));
+      prevBtn.addEventListener('click', () => openArenaPreview({ title: activity.path || displayTitle, url: activity.url, isImage: isImg }));
+      body.appendChild(prevBtn);
+    }
+    if (childId) {
+      const openBtn = el('button', { class: 'preview-link subagent-open', type: 'button' },
+        iconEl('message'), el('span', { text: 'Open sub-agent chat' }));
+      openBtn.addEventListener('click', () => { void openChat(String(childId)); });
+      body.appendChild(openBtn);
+    }
+
+    return preservedDetails(activityKey, `arena-tool-item${status.cls === 'is-err' ? ' is-danger' : ''}`, summary, body);
+  }
+
   function renderActivities(lane, baseKey = '') {
     if (!Array.isArray(lane.activities) || !lane.activities.length) return null;
-    const cards = lane.activities.map((activity, activityIndex) => {
-      const status = activityStatus(activity.status);
-      const detail = activity.command || activity.path || activity.detail;
-      const childId = activity.raw?.child_id;
-      const subModel = activity.raw?.model_name || (activity.raw?.model && !['a', 'b'].includes(activity.raw.model) ? activity.raw.model : '');
-      const iconName = childId ? 'layers' : activity.name === 'Question' ? 'help' : activity.kind === 'sandbox' ? 'package' : activity.kind === 'webdev' ? 'layout' : activity.kind === 'agent' ? 'spark' : 'terminal';
-      const head = el('div', { class: 'activity-head' },
-        el('span', { class: 'activity-icon' }, iconEl(iconName)),
-        el('span', { class: 'activity-title', text: childId ? `Sub-agent${subModel ? ' \u00b7 ' + subModel : ''}` : (activity.name || "Action") }),
-        el('span', { class: `activity-status ${status.cls}`, text: status.label })
-      );
-      const card = el('div', { class: `activity-card${status.cls === 'is-err' ? ' is-danger' : ''}` }, head);
-      const mcpUsed = mcpToolsUsed(activity);
-      if (mcpUsed.length) {
-        const shown = mcpUsed.slice(0, 3).join(', ') + (mcpUsed.length > 3 ? ` +${mcpUsed.length - 3}` : '');
-        card.appendChild(el('div', { class: 'activity-mcp', title: `MCP via Gateway: ${mcpUsed.join(', ')}` },
-          iconEl('plug'), el('span', { text: `MCP: ${shown}` })));
-      }
-      if (detail) {
-        const isLong = detail.length > 180 || String(activity.status).toLowerCase() === 'running';
-        const activityKey = `${baseKey}:activity:${activity.id || activityIndex}:${activity.name || 'action'}`;
-        if (isLong) {
-          const details = preservedDetails(activityKey, 'activity-detail',
-            el('summary', { text: "Show details" }),
-            el('div', { class: 'activity-body' }, el('pre', { text: detail, 'data-scroll-key': `${activityKey}:pre` }))
-          );
-          card.appendChild(details);
+    const nodes = [];
+    const list = lane.activities;
+    let i = 0;
+    while (i < list.length) {
+      const isFinishedCmd = (a) => {
+        const n = String(a?.name || '').toLowerCase();
+        const st = activityStatus(a?.status).cls;
+        return (n === 'bash' || n === 'run' || n === 'run_cmd' || n === 'shell') && st !== 'is-run';
+      };
+      if (isFinishedCmd(list[i])) {
+        const start = i;
+        while (i < list.length && isFinishedCmd(list[i])) i++;
+        const count = i - start;
+        if (count >= 2) {
+          const groupKey = `${baseKey}:cmdgroup:${start}:${count}`;
+          const children = [];
+          for (let j = start; j < i; j++) children.push(renderSingleActivityCard(list[j], j, baseKey));
+          nodes.push(preservedDetails(groupKey, 'arena-cmd-group',
+            el('summary', { class: 'arena-cmd-group-summary' },
+              iconEl('terminal'),
+              el('span', { text: `Ran commands ${count}` })
+            ),
+            el('div', { class: 'arena-cmd-group-body' }, children)
+          ));
         } else {
-          card.appendChild(el('div', { class: 'activity-body' }, el('pre', { text: detail, 'data-scroll-key': `${activityKey}:pre` })));
+          nodes.push(renderSingleActivityCard(list[start], start, baseKey));
         }
+      } else {
+        nodes.push(renderSingleActivityCard(list[i], i, baseKey));
+        i++;
       }
-      if (activity.url) {
-        card.appendChild(el('a', { class: 'preview-link', href: activity.url, target: '_blank', rel: 'noopener noreferrer', title: activity.url },
-          iconEl('external'), el('span', { text: activity.url })));
-      }
-      if (childId) {
-        const openBtn = el('button', { class: 'preview-link subagent-open', type: 'button' },
-          iconEl('message'), el('span', { text: 'Open sub-agent chat' }));
-        openBtn.addEventListener('click', () => { void openChat(String(childId)); });
-        card.appendChild(openBtn);
-      }
-      return card;
-    });
-    return el('div', { class: 'activity-list' }, cards);
+    }
+    return el('div', { class: 'activity-list arena-tool-list' }, nodes);
   }
 
   function renderArtifactsInline(lane) {

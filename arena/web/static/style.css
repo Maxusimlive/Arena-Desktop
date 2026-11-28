@@ -2875,6 +2875,230 @@ body {
 .stream-dots span:nth-child(2) { animation-delay: 0.18s !important; }
 .typing-dots span:nth-child(3),
 .stream-dots span:nth-child(3) { animation-delay: 0.36s !important; }
+
+/* ==========================================================================
+   Arena-style Tool Cards, Ran Commands Group, Image Gen Loader & Preview Panel
+   ========================================================================== */
+.arena-tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0 10px;
+}
+.arena-cmd-group,
+.arena-tool-item {
+  border: 0;
+  background: transparent;
+}
+.arena-cmd-group-summary,
+.arena-tool-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+  color: #b7bcc6;
+  padding: 3px 4px;
+  border-radius: 6px;
+  user-select: none;
+}
+.arena-cmd-group-summary:hover,
+.arena-tool-summary:hover {
+  color: #eef0f4;
+  background: rgba(255, 255, 255, 0.04);
+}
+.arena-tool-icon .icon,
+.arena-cmd-group-summary .icon {
+  width: 14px;
+  height: 14px;
+  opacity: 0.78;
+}
+.arena-tool-name {
+  font-weight: 500;
+  color: #d6dae2;
+}
+.arena-tool-check {
+  color: #4ade80;
+  font-weight: 700;
+  font-size: 12px;
+}
+.arena-tool-dur {
+  font-size: 11.5px;
+  color: #7c828e;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.arena-cmd-group-body {
+  padding-left: 16px;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+.arena-tool-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 8px 18px;
+}
+.arena-io-box {
+  background: #17181b;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.arena-io-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 10px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #7d838f;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+.arena-io-copy {
+  background: transparent;
+  border: 0;
+  color: #8c929e;
+  cursor: pointer;
+  padding: 2px;
+  display: inline-flex;
+}
+.arena-io-copy:hover { color: #eceef2; }
+.arena-io-copy .icon { width: 13px; height: 13px; }
+.arena-io-pre {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #d8dce4;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Arena-style Generating image options loader */
+.arena-img-gen {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 2px;
+}
+.arena-img-gen-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #9ba1ad;
+}
+.arena-img-gen-head .icon { width: 16px; height: 16px; opacity: 0.8; }
+.arena-img-gen-prompt {
+  font-size: 13px;
+  line-height: 1.45;
+  color: #c7ccd6;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Right-side Arena Preview Panel */
+.arena-preview-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 44vw;
+  min-width: 360px;
+  max-width: 720px;
+  z-index: 95;
+  background: #141517;
+  border-left: 1px solid rgba(255, 255, 255, 0.10);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -12px 0 36px rgba(0, 0, 0, 0.55);
+}
+.arena-preview-panel.is-wide {
+  width: 72vw;
+  max-width: 1100px;
+}
+.arena-preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: #18191c;
+}
+.arena-preview-title {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 12.5px;
+  color: #e4e7ee;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.arena-preview-title .icon { width: 14px; height: 14px; opacity: 0.8; flex: 0 0 auto; }
+.arena-preview-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  color: #c8cdd8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  text-decoration: none;
+}
+.arena-preview-btn:hover { background: rgba(255, 255, 255, 0.09); color: #fff; }
+.arena-preview-btn .icon { width: 14px; height: 14px; }
+.arena-preview-stage {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.arena-preview-img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+  object-fit: contain;
+}
+.arena-preview-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 8px;
+  background: #fff;
+}
+.arena-preview-code {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 12px;
+  font-size: 12.5px;
+  color: #d8dce4;
+  white-space: pre-wrap;
+  overflow: auto;
+}
 .status-bar { border-top-color: transparent; color: #83817c; }
 .button { border-radius: 999px; }
 .popover, .modal-card { background: #2d2d2b; border-color: #454441; }

@@ -4860,6 +4860,7 @@ You can start with a more structured option: one script, short captions, and a c
       const isFinishedCmd = (a) => {
         const n = String(a?.name || '').toLowerCase();
         const st = activityStatus(a?.status).cls;
+        if (mcpToolsUsed(a).length) return false;
         return (n === 'bash' || n === 'run' || n === 'run_cmd' || n === 'shell') && st !== 'is-run';
       };
       if (isFinishedCmd(list[i])) {
@@ -4867,12 +4868,13 @@ You can start with a more structured option: one script, short captions, and a c
         while (i < list.length && isFinishedCmd(list[i])) i++;
         const count = i - start;
         if (count >= 2) {
-          const groupKey = `${baseKey}:cmdgroup:${start}:${count}`;
+          const groupKey = `${baseKey}:cmdgroup:${start}`;
           const children = [];
           for (let j = start; j < i; j++) children.push(renderSingleActivityCard(list[j], j, baseKey));
           nodes.push(preservedDetails(groupKey, 'arena-cmd-group',
             el('summary', { class: 'arena-cmd-group-summary' },
-              iconEl('terminal'),
+              el('span', { class: 'arena-chevron', text: '▸' }),
+              el('span', { class: 'arena-tool-icon' }, iconEl('terminal')),
               el('span', { text: `Ran commands ${count}` })
             ),
             el('div', { class: 'arena-cmd-group-body' }, children)

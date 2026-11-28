@@ -2908,11 +2908,38 @@ body {
   color: #eef0f4;
   background: rgba(255, 255, 255, 0.04);
 }
-.arena-tool-icon .icon,
-.arena-cmd-group-summary .icon {
-  width: 14px;
-  height: 14px;
+.arena-tool-icon,
+.arena-cmd-group-summary .arena-tool-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+.arena-tool-icon svg,
+.arena-cmd-group-summary svg,
+.arena-io-copy svg,
+.arena-preview-btn svg,
+.arena-preview-title svg,
+.arena-img-gen-head svg {
+  width: 14px !important;
+  height: 14px !important;
+  flex: 0 0 auto;
   opacity: 0.78;
+}
+.arena-chevron {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 1;
+  color: #7c828e;
+  transition: transform 140ms ease;
+  width: 12px;
+  text-align: center;
+  flex: 0 0 auto;
+}
+details[open] > summary > .arena-chevron {
+  transform: rotate(90deg);
 }
 .arena-tool-name {
   font-weight: 500;

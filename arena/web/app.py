@@ -9198,13 +9198,20 @@ def _google_track_stream(chat_id, message):
             effective = _google_compose_query(message, messages[:-1], hl)
             agent_on = bool(prefs.get("supervisor"))
             if agent_on:
-                # Keep the prompt ultra-short and free of < > angle brackets so
-                # Google Search /search?q=...&udm=50 never triggers its XSS/WAF interstitial.
+                ws = str(_workspace_dir())
                 sys_prompt = (
-                    "Act as a Windows local agent. "
-                    "To execute a shell command reply with [RUN]command[/RUN]. "
-                    "To list files reply with [LS]. "
-                    "Request: "
+                    f"You are a local AI coding agent on Windows. Workspace: {ws}\n"
+                    "You have real local tools. To call a tool, output XML tags exactly like this:\n"
+                    '<tool name="run"><param name="command">shell command</param></tool>\n'
+                    '<tool name="write"><param name="path">file.py</param><param name="content">full file content</param></tool>\n'
+                    '<tool name="read"><param name="path">file.py</param></tool>\n'
+                    '<tool name="edit"><param name="path">file.py</param><param name="old">old text</param><param name="new">new text</param></tool>\n'
+                    '<tool name="ls"><param name="path">.</param></tool>\n'
+                    '<tool name="grep"><param name="pattern">text</param><param name="path">.</param></tool>\n'
+                    "Rules: Never say you cannot access files or run commands — use the tools above. "
+                    "Prefer write for creating files instead of python -c. "
+                    "After emitting tool tags, stop and wait for tool results before giving the final answer.\n\n"
+                    "User request: "
                 )
                 effective = sys_prompt + effective
             # A turn must never be able to sit here forever: the browser shows
@@ -9353,10 +9360,11 @@ def _google_track_stream(chat_id, message):
 
         # Supervisor mode: the answer above is the plan, and an Arena Agent chat
         # carries it out. Google stays the planner; the executor only follows
-        # Local agent integration loop (same tool-calling loop as Direct mode).
-        if answer and prefs.get("supervisor") and client is not None:
+        # Local agent integration loop (same XML tool-calling loop as Direct mode).
+        if answer and prefs.get("supervisor"):
             ws = _workspace_dir()
-            for _round in range(1, 7):
+            eng = _google_engine()
+            for _round in range(1, 9):
                 calls = agent.parse_tool_calls(answer)
                 if not calls:
                     break
@@ -9373,17 +9381,46 @@ def _google_track_stream(chat_id, message):
                         ok = False
                     yield _sse({"type": "tool_result", "tool": tool_name, "ok": ok,
                                 "output": str(out)[:2000], "model": "a"})
-                    results_text.append(f"[Tool {tool_name} result]\n{out}")
-                followup_q = "\n\n".join(results_text) + "\n\nContinue and answer the user."
-                try:
-                    next_res = _google_ask_with_deadline(client, followup_q)
-                    next_ans = next_res.get("text") or ""
-                    if next_ans:
-                        answer = next_ans
-                        yield _sse({"type": "text", "text": answer, "model": "a"})
-                    else:
-                        break
-                except Exception:
+                    results_text.append(f'<tool_result name="{tool_name}">\n{str(out)[:2500]}\n</tool_result>')
+                followup_q = "\n\n".join(results_text) + "\n\nContinue and answer the user (or call more tools if needed)."
+                next_ans = ""
+                if client is not None and not window_sent:
+                    try:
+                        next_res = _google_ask_with_deadline(client, followup_q)
+                        next_ans = (next_res.get("text") or "").strip()
+                    except Exception:
+                        next_ans = ""
+                if not next_ans and eng is not None and getattr(eng, "window", None) is not None:
+                    try:
+                        eng.load(eng.search_url(followup_q, hl))
+                        time.sleep(3.5)
+                        f_deadline = time.time() + 35.0
+                        f_last = ""
+                        f_stable = 0.0
+                        while time.time() < f_deadline:
+                            time.sleep(1.0)
+                            f_cur = ""
+                            try:
+                                f_raw = eng._answer_text()
+                                if f_raw:
+                                    f_cur = eng.clean_answer(f_raw, followup_q)
+                            except Exception:
+                                f_cur = ""
+                            if f_cur and f_cur != f_last:
+                                f_last = f_cur
+                                f_stable = time.time()
+                                yield _sse({"type": "text", "text": f_cur, "model": "a"})
+                            elif f_cur and f_stable and (time.time() - f_stable) >= 2.0:
+                                next_ans = f_cur
+                                break
+                        if not next_ans and f_last:
+                            next_ans = f_last
+                    except Exception as f_exc:
+                        LOG.info("[google-agent] followup webview failed: %s", f_exc)
+                if next_ans:
+                    answer = next_ans
+                    yield _sse({"type": "text", "text": answer, "model": "a"})
+                else:
                     break
 
         if answer:

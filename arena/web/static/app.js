@@ -4691,7 +4691,8 @@ You can start with a more structured option: one script, short captions, and a c
     };
     const raw = activity.raw || {};
     if (raw.mcp_tool || raw.gateway_tool) push(raw.mcp_server || raw.gateway_server || raw.server, raw.mcp_tool || raw.gateway_tool);
-    const text = [activity.command, activity.detail, activity.path].filter(Boolean).join('\n');
+    const rawText = [activity.command, activity.detail, activity.path].filter(Boolean).join('\n');
+    const text = rawText.replace(/\\"/g, '"').replace(/\\'/g, "'");
     if (text) {
       let server = '';
       const jobCall = text.match(/\bjob\(\s*["']([^"']+)["']/) || text.match(/["']server["']\s*:\s*["']([^"']+)["']/);
@@ -4711,11 +4712,38 @@ You can start with a more structured option: one script, short captions, and a c
 
   function parseActivityIO(activity) {
     const rawDetail = String(activity.command || activity.path || activity.detail || '').trim();
-    const rawOutput = String(activity.output ?? activity.result ?? activity.raw?.output ?? activity.raw?.stdout ?? activity.raw?.result ?? '').trim();
+    const rawOutVal = activity.output ?? activity.result ?? activity.raw?.output ?? activity.raw?.stdout ?? activity.raw?.result ?? '';
     let inputLabel = 'INPUT';
     let inputText = rawDetail;
-    let outputText = rawOutput;
+    let outputText = '';
     let promptText = '';
+    let exitCode = activity.exit_code ?? activity.raw?.exit_code ?? null;
+    let parsedDurMs = Number(activity.duration_ms ?? activity.raw?.duration_ms ?? activity.raw?.elapsed_ms ?? 0);
+
+    if (rawOutVal && typeof rawOutVal === 'object') {
+      if (rawOutVal.duration_ms != null && !parsedDurMs) parsedDurMs = Number(rawOutVal.duration_ms) || 0;
+      if (rawOutVal.exit_code != null && exitCode == null) exitCode = Number(rawOutVal.exit_code);
+      const parts = [];
+      if (rawOutVal.stdout) parts.push(String(rawOutVal.stdout));
+      if (rawOutVal.stderr) parts.push(String(rawOutVal.stderr));
+      outputText = parts.length ? parts.join('\n') : JSON.stringify(rawOutVal, null, 2);
+    } else if (typeof rawOutVal === 'string' && rawOutVal.trim()) {
+      const s = rawOutVal.trim();
+      if (s.startsWith('{') && s.endsWith('}')) {
+        try {
+          const o = JSON.parse(s);
+          if (o.duration_ms != null && !parsedDurMs) parsedDurMs = Number(o.duration_ms) || 0;
+          if (o.exit_code != null && exitCode == null) exitCode = Number(o.exit_code);
+          const parts = [];
+          if (o.stdout) parts.push(String(o.stdout));
+          if (o.stderr) parts.push(String(o.stderr));
+          outputText = parts.length ? parts.join('\n') : s;
+        } catch { outputText = s; }
+      } else {
+        outputText = s;
+      }
+    }
+
     if (rawDetail.startsWith('{') && rawDetail.endsWith('}')) {
       try {
         const obj = JSON.parse(rawDetail);
@@ -4736,7 +4764,7 @@ You can start with a more structured option: one script, short captions, and a c
       inputLabel = 'COMMAND';
       if (inputText && !inputText.startsWith('$ ')) inputText = `$ ${inputText}`;
     }
-    return { inputLabel, inputText, outputText, promptText };
+    return { inputLabel, inputText, outputText, promptText, exitCode, parsedDurMs };
   }
 
   function arenaCopyBox(label, text) {
@@ -4788,7 +4816,7 @@ You can start with a more structured option: one script, short captions, and a c
     const status = activityStatus(activity.status);
     const nameRaw = String(activity.name || 'Action');
     const nameLow = nameRaw.toLowerCase();
-    const { inputLabel, inputText, outputText, promptText } = parseActivityIO(activity);
+    const { inputLabel, inputText, outputText, promptText, exitCode, parsedDurMs } = parseActivityIO(activity);
 
     // Arena-style image generation loading state
     if ((nameLow.includes('generate_image') || nameLow === 'image') && status.cls === 'is-run') {

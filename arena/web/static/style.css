@@ -2938,8 +2938,28 @@ body {
   text-align: center;
   flex: 0 0 auto;
 }
-details[open] > summary > .arena-chevron {
-  transform: rotate(90deg);
+.arena-cmd-group-summary::-webkit-details-marker,
+.arena-tool-summary::-webkit-details-marker {
+  display: none !important;
+}
+.arena-tool-fail {
+  color: #f87171;
+  font-weight: 700;
+  font-size: 12px;
+}
+@keyframes arenaFadeSlide {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+details[open] > .arena-tool-body,
+details[open] > .arena-cmd-group-body {
+  animation: arenaFadeSlide 160ms ease-out;
+}
+.chat-head,
+.chat-view-head,
+.chat-header {
+  background: transparent !important;
+  box-shadow: none !important;
 }
 .arena-tool-name {
   font-weight: 500;

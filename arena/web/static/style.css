@@ -2687,7 +2687,9 @@ textarea.input { height: auto; min-height: 74px; resize: vertical; line-height: 
 /* Message surfaces in Arena neutrals */
 .message-user .message-bubble, .user-bubble { background: #353532; }
 .assistant-lane { background: transparent; }
-.assistant-lane.is-streaming { border-color: #454441; }
+.assistant-lane.is-streaming { border: 0 !important; border-color: transparent !important; box-shadow: none !important; }
+.assistant-lane.is-streaming .lane-head { border-bottom-color: transparent !important; }
+.agent-steps { display: none !important; }
 .status-bar { border-top-color: transparent; color: #83817c; }
 .button { border-radius: 999px; }
 .popover, .modal-card { background: #2d2d2b; border-color: #454441; }

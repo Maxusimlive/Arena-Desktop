@@ -1850,10 +1850,21 @@ class GoogleEngine:
 
     def _answer_text(self) -> Optional[str]:
         script = """(() => {
-          const main = document.querySelector('#rcnt') || document.querySelector('main') || document.body;
-          if (!main) return '';
-          const t = (main.innerText || '').trim();
-          return t;
+          const cands = [
+            document.querySelector('[data-container-id="main-col"]'),
+            document.querySelector('main'),
+            document.querySelector('[role="main"]'),
+            document.querySelector('#rcnt'),
+            document.body
+          ];
+          for (const el of cands) {
+            if (!el) continue;
+            const t = (el.innerText || '').trim();
+            if (t.length > 20) return t;
+          }
+          const body = document.body;
+          if (!body) return '';
+          return (body.innerText || body.textContent || '').trim();
         })()"""
         value = self.run_script(script)
         if value is None:

@@ -9258,28 +9258,37 @@ def _google_track_stream(chat_id, message):
                 has_window = False
             elif has_window and code == "throttled":
                 # Plain HTTP hit Google's JS interstitial, which a real WebView
-                # solves automatically! Stream directly through the Google WebView.
+                # solves automatically! Load the search URL in the Google WebView
+                # and read the rendered AI Mode answer once it stabilizes.
                 yield _sse({"type": "agent", "stage": "Google AI mode (WebView)…"})
                 w_text = ""
                 try:
-                    for ev in engine.ask(effective, first=first, hl=hl):
-                        if not isinstance(ev, dict):
-                            continue
-                        etype = ev.get("type")
-                        if etype == "text" and ev.get("text"):
-                            w_text = str(ev.get("text"))
-                            yield _sse({"type": "text", "text": w_text, "model": "a"})
-                        elif etype == "done" and ev.get("text_a"):
-                            w_text = str(ev.get("text_a"))
-                        elif etype == "error":
-                            LOG.info("google webview fallback event error: %s", ev.get("message"))
+                    engine.load(engine.search_url(effective, hl))
+                    deadline = time.time() + 35.0
+                    last_seen = ""
+                    stable_since = 0.0
+                    while time.time() < deadline:
+                        time.sleep(0.8)
+                        cur = ""
+                        try:
+                            cur = engine.clean_answer(engine._answer_text() or "", effective)
+                        except Exception:
+                            cur = ""
+                        if cur and cur != last_seen:
+                            last_seen = cur
+                            stable_since = time.time()
+                            yield _sse({"type": "text", "text": cur, "model": "a"})
+                        elif cur and stable_since and (time.time() - stable_since) >= 2.0:
+                            w_text = cur
+                            break
+                    if not w_text and last_seen:
+                        w_text = last_seen
                 except Exception as exc:
                     LOG.info("google webview fallback failed: %s", exc)
                 if w_text.strip():
                     answer = w_text.strip()
                     window_sent = True
                 else:
-                    engine.load(engine.search_url(effective, hl))
                     engine.show()
                     yield _sse({"type": "error", "code": code,
                                 "message": (http_error.message if http_error else "")

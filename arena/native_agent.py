@@ -444,6 +444,13 @@ def out_url_candidates(origin: str, trigger_address) -> list:
     return unique
 
 
+def _bare_session_uuid(session_id) -> str:
+    sid = str(session_id or "").strip()
+    if ":" in sid:
+        sid = sid.split(":", 1)[1].strip()
+    return sid
+
+
 def chat_events_url(origin: str, session_id) -> str:
     """Arena's current reader for an agent session (SSE).
 
@@ -451,17 +458,17 @@ def chat_events_url(origin: str, session_id) -> str:
     ``/api/chat/:id/events`` before it hits the network, and strips the
     Authorization header: the proxy authenticates with the account cookies.
     """
-    return f"{origin.rstrip('/')}/api/chat/{urllib.parse.quote(str(session_id), safe='')}/events"
+    return f"{origin.rstrip('/')}/api/chat/{urllib.parse.quote(_bare_session_uuid(session_id), safe='')}/events"
 
 
 def chat_input_url(origin: str, session_id) -> str:
     """Arena's current writer for an agent session (one append = one message)."""
-    return f"{origin.rstrip('/')}/api/chat/{urllib.parse.quote(str(session_id), safe='')}/input"
+    return f"{origin.rstrip('/')}/api/chat/{urllib.parse.quote(_bare_session_uuid(session_id), safe='')}/input"
 
 
 def chat_session_path(session_id) -> str:
     """Start/reopen route: POST with ``{timezone}`` (was trigger-session)."""
-    return f"/api/chat/{urllib.parse.quote(str(session_id), safe='')}/session"
+    return f"/api/chat/{urllib.parse.quote(_bare_session_uuid(session_id), safe='')}/session"
 
 
 def stream_headers(pat: str = None, last_event_id=None) -> dict:

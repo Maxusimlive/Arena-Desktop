@@ -9264,14 +9264,19 @@ def _google_track_stream(chat_id, message):
                 w_text = ""
                 try:
                     engine.load(engine.search_url(effective, hl))
+                    # Give WebView2 a moment to finish initial navigation before
+                    # evaluating JS (avoids the 6s eval timeout during load).
+                    time.sleep(3.5)
                     deadline = time.time() + 35.0
                     last_seen = ""
                     stable_since = 0.0
                     while time.time() < deadline:
-                        time.sleep(0.8)
+                        time.sleep(1.0)
                         cur = ""
                         try:
-                            cur = engine.clean_answer(engine._answer_text() or "", effective)
+                            raw = engine._answer_text()
+                            if raw:
+                                cur = engine.clean_answer(raw, effective)
                         except Exception:
                             cur = ""
                         if cur and cur != last_seen:

@@ -105,10 +105,11 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    # UPX does not provide a reliable Windows ARM64 PE path; leave the
-    # native ARM64 bootloader unpacked instead of risking a broken EXE.
-    upx=not _IS_ARM64,
+    # Disable UPX across all architectures: UPX-packed PyInstaller onefile
+    # bootloaders frequently trigger Chrome Safe Browsing / Defender false positives.
+    upx=False,
     upx_exclude=[],
+    version='version_info.txt',
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,

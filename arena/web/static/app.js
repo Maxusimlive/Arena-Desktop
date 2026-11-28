@@ -5825,18 +5825,21 @@ You can start with a more structured option: one script, short captions, and a c
       content.appendChild(connSection);
     }
 
-    // 3. MCP — local servers; Add opens the existing CLI/JSON menu
-    const mcpSection = el('div', { class: 'popover-connections' });
-    mcpSection.appendChild(el('div', { class: 'popover-section-title popover-section-row' },
-      el('span', { text: 'MCP' }),
-      el('button', {
-        class: 'button button-small', type: 'button',
-        onclick: () => { closePopover(); openAddConnectorModal('local'); }
-      }, iconEl('plus'), el('span', { text: 'Add' }))
-    ));
-    const mcpList = el('div', { class: 'popover-connector-list' });
-    mcpSection.appendChild(mcpList);
-    content.appendChild(mcpSection);
+    // 3. MCP — local servers (hidden in Google AI mode)
+    let mcpList = null;
+    if (!googleTrack) {
+      const mcpSection = el('div', { class: 'popover-connections' });
+      mcpSection.appendChild(el('div', { class: 'popover-section-title popover-section-row' },
+        el('span', { text: 'MCP' }),
+        el('button', {
+          class: 'button button-small', type: 'button',
+          onclick: () => { closePopover(); openAddConnectorModal('local'); }
+        }, iconEl('plus'), el('span', { text: 'Add' }))
+      ));
+      mcpList = el('div', { class: 'popover-connector-list' });
+      mcpSection.appendChild(mcpList);
+      content.appendChild(mcpSection);
+    }
 
     openPopover(els.attachButton, { title: '', content, placement: 'above' });
 
@@ -5852,18 +5855,18 @@ You can start with a more structured option: one script, short captions, and a c
       } else if (connList) {
         arena.forEach((item) => connList.appendChild(arenaPopoverRow(item)));
       }
-      clear(mcpList);
+      if (mcpList) clear(mcpList);
       const servers = connectorServersList();
-      if (state.connectorsLoading && !state.connectors) {
+      if (mcpList && state.connectorsLoading && !state.connectors) {
         mcpList.appendChild(el('span', { class: 'loading-block' }, el('span', { class: 'mini-spinner' }), el('span', { text: 'Loading…' })));
-      } else if (!servers.length) {
+      } else if (mcpList && !servers.length) {
         mcpList.appendChild(el('p', { class: 'modal-copy', text: 'No MCP servers yet. Click Add.' }));
-      } else {
+      } else if (mcpList) {
         servers.forEach((server) => mcpList.appendChild(mcpPopoverRow(server)));
       }
     };
     renderRows();
-    if (!state.connectors) void loadConnectors({ silent: true }).then(renderRows);
+    if (mcpList && !state.connectors) void loadConnectors({ silent: true }).then(renderRows);
     if (connList && state.authenticated && !state.arenaConnectors) void loadArenaConnectors({ silent: true }).then(renderRows);
   }
 
@@ -6033,8 +6036,24 @@ You can start with a more structured option: one script, short captions, and a c
     return section;
   }
 
-  function renderMessages({ preserveScroll = true } = {}) {
+  let _renderRaf = 0;
+  let _renderTimer = 0;
+  let _lastRenderAt = 0;
+  function renderMessages({ preserveScroll = true, immediate = false } = {}) {
     if (!els.messageList) return;
+    if (!immediate && state.streaming) {
+      const now = performance.now();
+      if (now - _lastRenderAt < 110) {
+        if (!_renderTimer) {
+          _renderTimer = setTimeout(() => {
+            _renderTimer = 0;
+            renderMessages({ preserveScroll, immediate: true });
+          }, 110 - (now - _lastRenderAt));
+        }
+        return;
+      }
+    }
+    _lastRenderAt = performance.now();
     const content = els.content;
     const previousScroll = content?.scrollTop || 0;
     const wasNearBottom = content ? content.scrollHeight - content.scrollTop - content.clientHeight < 140 : true;

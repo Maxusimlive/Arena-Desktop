@@ -389,30 +389,40 @@ class ConnectorManager:
             status = "disabled"
             if server["transport"] == "builtin":
                 return {
+                    "id": name,
                     "name": name,
                     "enabled": False,
+                    "running": False,
                     "status": "disabled",
                     "transport": "builtin",
-                    "command": server.get("command") or "Built-in Orchestrator",
+                    "description": "Google AI Mode (Senior) → Local Model (Junior)",
+                    "source": "builtin",
+                    "command_display": "Built-in · Google AI Mode (Senior) → Local Model (Junior)",
                     "preset_id": "orchestrator",
                     "error": None,
                     "tools": [],
+                    "tools_count": 0,
                     "tool_count": 0,
                 }
         elif server["transport"] == "builtin":
             from arena import orchestrator_mcp
             return {
+                "id": name,
                 "name": name,
                 "enabled": True,
+                "running": True,
                 "status": "connected",
                 "transport": "builtin",
-                "command": server.get("command") or "Built-in Orchestrator",
+                "description": "Google AI Mode (Senior) → Local Model (Junior)",
+                "source": "builtin",
+                "command_display": "Built-in · Google AI Mode (Senior) → Local Model (Junior)",
                 "preset_id": "orchestrator",
                 "error": None,
                 "tools": [
                     {"name": t["name"], "description": t.get("description") or ""}
                     for t in orchestrator_mcp.TOOLS
                 ],
+                "tools_count": len(orchestrator_mcp.TOOLS),
                 "tool_count": len(orchestrator_mcp.TOOLS),
             }
         elif server["transport"] != "stdio":
@@ -447,6 +457,9 @@ class ConnectorManager:
 
     def connect(self, name: str, timeout: float = 45.0) -> Dict[str, Any]:
         servers = self._servers()
+        server = servers.get(name)
+        if server and server.get("transport") == "builtin":
+            return self._summary(server)
         server = servers.get(name)
         if server is None:
             raise KeyError(f"Connector not found: {name}")

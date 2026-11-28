@@ -387,6 +387,18 @@ class ConnectorManager:
             client = None
         if not server["enabled"]:
             status = "disabled"
+            if server["transport"] == "builtin":
+                return {
+                    "name": name,
+                    "enabled": False,
+                    "status": "disabled",
+                    "transport": "builtin",
+                    "command": server.get("command") or "Built-in Orchestrator",
+                    "preset_id": "orchestrator",
+                    "error": None,
+                    "tools": [],
+                    "tool_count": 0,
+                }
         elif server["transport"] == "builtin":
             from arena import orchestrator_mcp
             return {
@@ -474,7 +486,10 @@ class ConnectorManager:
         data = read_config(self._config_path)
         servers = data.setdefault("mcpServers", {})
         if name not in servers:
-            raise KeyError(f"Connector not found: {name}")
+            if name == "orchestrator":
+                servers[name] = {"builtin": True, "disabled": not bool(enabled)}
+            else:
+                raise KeyError(f"Connector not found: {name}")
         entry = servers[name]
         if not isinstance(entry, dict):
             raise ValueError("Connector entry must be a JSON object")

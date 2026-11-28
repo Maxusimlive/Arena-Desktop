@@ -594,10 +594,14 @@ class GatewayManager:
     def _filtered_index(self) -> Dict[str, Any]:
         index = self._tool_index() or {}
         if self._servers:
-            index = {name: data for name, data in index.items() if name in self._servers}
+            index = {
+                name: data for name, data in index.items()
+                if name in self._servers or name == "orchestrator"
+            }
         return index
 
     def _public_index(self) -> List[Dict[str, Any]]:
+        self._index = self._filtered_index()
         out = []
         for server, data in sorted(self._index.items()):
             tools = []
